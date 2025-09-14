@@ -36,6 +36,12 @@ The SRA Trawler script is designed to systematically search through the NCBI SRA
 
 # Resume and retry only download failures
 ./sra-trawler.sh -d existing.db -f reference.fasta -r
+
+# Update existing database with new entries from CSV file
+./sra-trawler.sh -c new_entries.csv -d existing.db -f reference.fasta
+
+# Update existing database with new entries for a specific organism
+./sra-trawler.sh -d existing.db -o "Aspergillus" -f reference.fasta
 ```
 
 ### Output

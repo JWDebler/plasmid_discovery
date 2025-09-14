@@ -142,8 +142,11 @@ Examples:
     # Resume and retry ALL failed entries (recommended for systematic fixes)
     $(basename "$0") -d existing.db -f reference.fasta -R
     
-    # Update existing database with new entries for an organism
-    $(basename "$0") -c data.csv -d existing.db -f reference.fasta
+    # Update existing database with new entries from CSV file
+    $(basename "$0") -c new_entries.csv -d existing.db -f reference.fasta
+    
+    # Update existing database with new entries for a specific organism
+    $(basename "$0") -d existing.db -o "Aspergillus" -f reference.fasta
     
     # Run with debug output enabled
     $(basename "$0") -d existing.db -f reference.fasta -D
