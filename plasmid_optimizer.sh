@@ -109,103 +109,74 @@ optimize_plasmid() {
         temp_dir="${OUTPUT_DIR}/temp_${plasmid_name}"
         mkdir -p "$temp_dir"
         
-        # Create BLAST database for the plasmid
-        makeblastdb -in "$plasmid_file" -dbtype nucl -out "${temp_dir}/plasmid_db" >/dev/null 2>&1
-        
-        # BLAST plasmid against reference
+        # STEP 1: Trim only DIRECT repeats first
+        echo "Checking for direct repeats..." >&2
+        local trimmed_candidate="${temp_dir}/plasmid_trim_candidate.fasta"
+        trim_direct_repeats "$plasmid_file" "$trimmed_candidate"
+        local orig_len=$(get_plasmid_length "$plasmid_file")
+        local cand_len=$(get_plasmid_length "$trimmed_candidate")
+        local repeats_trimmed=false
+        local working_plasmid="${plasmid_file}"
+        if [ "$cand_len" -lt "$orig_len" ]; then
+                repeats_trimmed=true
+                working_plasmid="$trimmed_candidate"
+                echo "  Direct repeat detected and trimmed (${orig_len} -> ${cand_len})" >&2
+        else
+                echo "  No direct repeats detected" >&2
+        fi
+
+        # STEP 2: BLAST match check against working plasmid
+        makeblastdb -in "$working_plasmid" -dbtype nucl -out "${temp_dir}/plasmid_db" >/dev/null 2>&1
         blastn -query "$REFERENCE" -db "${temp_dir}/plasmid_db" \
                 -out "${temp_dir}/blast_results.txt" \
                 -outfmt "6 qseqid sseqid pident qcovs qstart qend sstart send slen qlen" \
                 -evalue 1e-10 -num_threads "$THREADS"
-        
-        # Check if we have good alignments
+
         if [ ! -s "${temp_dir}/blast_results.txt" ]; then
-                echo "  No significant alignments found" >&2
-                # Try reverse complement
-                echo "  Trying reverse complement..." >&2
-                
-                # Create reverse complement version
-                local temp_rev="${temp_dir}/plasmid_rev.fasta"
-                seqkit seq -r -p --seq-type DNA "$plasmid_file" > "$temp_rev" 2>/dev/null
-                
-                # BLAST reverse complement against reference
-                makeblastdb -in "$temp_rev" -dbtype nucl -out "${temp_dir}/plasmid_rev_db" >/dev/null 2>&1
-                blastn -query "$REFERENCE" -db "${temp_dir}/plasmid_rev_db" \
-                        -out "${temp_dir}/blast_results_rev.txt" \
-                        -outfmt "6 qseqid sseqid pident qcovs qstart qend sstart send slen qlen" \
-                        -evalue 1e-10 -num_threads "$THREADS"
-                
-                if [ -s "${temp_dir}/blast_results_rev.txt" ]; then
-                        echo "  Reverse complement shows better alignment" >&2
-                        # Trim direct repeats before saving
-                        local trimmed_rev="${temp_dir}/plasmid_rev_trimmed.fasta"
-                        trim_direct_repeats "$temp_rev" "$trimmed_rev"
-                        cp "$trimmed_rev" "${OUTPUT_DIR}/${plasmid_name}_optimized.fasta"
-                        echo "  Optimized plasmid saved: ${plasmid_name}_optimized.fasta" >&2
+                echo "  No BLAST match found to reference. Skipping orientation/start adjustments." >&2
+                # Save final: trimmed if trimming happened, else original
+                if [ "$repeats_trimmed" = true ]; then
+                        cp "$working_plasmid" "${OUTPUT_DIR}/${plasmid_name}_final.fasta"
+                        echo "  Final plasmid saved: ${plasmid_name}_final.fasta (trimmed only)" >&2
                 else
-                        echo "  No good alignment even with reverse complement" >&2
-                        cp "$plasmid_file" "${OUTPUT_DIR}/${plasmid_name}_unaligned.fasta"
-                        echo "  Original plasmid saved: ${plasmid_name}_unaligned.fasta" >&2
+                        cp "$plasmid_file" "${OUTPUT_DIR}/${plasmid_name}_final.fasta"
+                        echo "  Final plasmid saved: ${plasmid_name}_final.fasta (no changes)" >&2
                 fi
         else
-                # Analyze BLAST results
+                # We have a BLAST match
                 local best_hit
                 best_hit=$(sort -k3,3nr -k4,4nr "${temp_dir}/blast_results.txt" | head -n1)
-                
                 if [ -n "$best_hit" ]; then
                         local pident qcovs
                         pident=$(echo "$best_hit" | cut -f3)
                         qcovs=$(echo "$best_hit" | cut -f4)
-                        
                         echo "  Best hit: ${pident}% identity, ${qcovs}% coverage" >&2
-                        
-                        # Process plasmid: check orientation, trim repeats, adjust start coordinates
-                        local processed_file="${OUTPUT_DIR}/${plasmid_name}_processed.fasta"
-                        local original_length=$(get_plasmid_length "$plasmid_file")
-                        local repeat_bases_trimmed=0
-                        
-                        # Check orientation and create reverse complement if needed
+
+                        # STEP 3: Orientation check via MUMmer and adjust if needed
                         echo "Checking orientation..." >&2
                         local temp_rev="${temp_dir}/plasmid_rev.fasta"
-                        seqkit seq -r -p --seq-type DNA "$plasmid_file" > "$temp_rev" 2>/dev/null
-                        
-                        local better_orientation
-                        better_orientation=$(get_better_orientation "$plasmid_file" "$temp_dir" "$temp_rev")
-                        
-                        local input_plasmid
-                        if [ "$better_orientation" = "reverse" ]; then
-                                if [ -f "$temp_rev" ]; then
-                                        input_plasmid="$temp_rev"
-                                        echo "  Using reverse complement" >&2
-                                else
-                                        echo "  WARNING: Reverse complement file not found, using original" >&2
-                                        input_plasmid="$plasmid_file"
-                                fi
+                        seqkit seq -r -p --seq-type DNA "$working_plasmid" > "$temp_rev" 2>/dev/null
+                        local orientation
+                        orientation=$(get_better_orientation "$working_plasmid" "$temp_dir" "$temp_rev")
+                        local oriented_plasmid="$working_plasmid"
+                        if [ "$orientation" = "reverse" ] && [ -f "$temp_rev" ]; then
+                                oriented_plasmid="$temp_rev"
+                                echo "  Orientation adjusted to reverse" >&2
                         else
-                                input_plasmid="$plasmid_file"
-                                echo "  Using original orientation" >&2
+                                echo "  Orientation kept as forward" >&2
                         fi
-                        
-                        # Trim direct repeats
-                        echo "Trimming direct repeats..." >&2
-                        local trimmed_plasmid="${temp_dir}/plasmid_trimmed.fasta"
-                        trim_direct_repeats "$input_plasmid" "$trimmed_plasmid"
-                        
-                        # Calculate repeat bases trimmed
-                        local trimmed_length=$(get_plasmid_length "$trimmed_plasmid")
-                        repeat_bases_trimmed=$((original_length - trimmed_length))
-                        
-                        # Find correct start coordinate
-                        echo "Adjusting start coordinate..." >&2
-                        find_correct_start "$trimmed_plasmid" "$processed_file"
-                        
-                        # Get final length
-                        local final_length=$(get_plasmid_length "$processed_file")
-                        
-                        # Write statistics to file
-                        echo -e "${plasmid_name}\t${original_length}\t${repeat_bases_trimmed}\t${final_length}\t${pident}\t${qcovs}" >> "$STATS_FILE"
-                        
-                        echo "Processed plasmid saved: ${plasmid_name}_processed.fasta" >&2
+
+                        # STEP 4: Start coordinate adjustment ONLY if repeats were trimmed
+                        if [ "$repeats_trimmed" = true ]; then
+                                echo "Adjusting start coordinate (repeat was trimmed)..." >&2
+                                local processed_file="${OUTPUT_DIR}/${plasmid_name}_final.fasta"
+                                find_correct_start "$oriented_plasmid" "$processed_file" "$temp_dir"
+                                echo "  Final plasmid saved: ${plasmid_name}_final.fasta (trim, orient, start adjusted)" >&2
+                        else
+                                # No repeats trimmed: do NOT adjust start coordinate, just save orientation-fixed plasmid
+                                cp "$oriented_plasmid" "${OUTPUT_DIR}/${plasmid_name}_final.fasta"
+                                echo "  Final plasmid saved: ${plasmid_name}_final.fasta (orientation only)" >&2
+                        fi
                 fi
         fi
         
@@ -220,9 +191,9 @@ trim_direct_repeats() {
         
         echo "  Checking for direct repeat sequences at plasmid ends..." >&2
         
-        # Read plasmid sequence
+        # Read plasmid sequence (remove all whitespace and line breaks)
         local plasmid_seq
-        plasmid_seq=$(awk 'BEGIN{seq=""} /^>/{next} {gsub(/\r/,""); seq = seq $0} END{print seq}' "$plasmid_file")
+        plasmid_seq=$(awk 'BEGIN{seq=""} /^>/{next} {gsub(/\r/,""); gsub(/\s/,""); seq = seq $0} END{print seq}' "$plasmid_file")
         local seq_len=${#plasmid_seq}
         
         if [ $seq_len -eq 0 ]; then
@@ -237,8 +208,11 @@ trim_direct_repeats() {
         
         local best_repeat_len=0
         local best_repeat_start=0
+        local best_extra_bases=0
+        local best_trim_from_start=true
+
         
-        # Try different repeat lengths
+        # Check for exact repeats at ends
         for ((repeat_len=10; repeat_len<=max_repeat_len; repeat_len++)); do
                 local start_seq end_seq
                 start_seq="${plasmid_seq:0:$repeat_len}"
@@ -247,16 +221,59 @@ trim_direct_repeats() {
                 if [ "$start_seq" = "$end_seq" ]; then
                         best_repeat_len=$repeat_len
                         best_repeat_start=$repeat_len
+                        best_extra_bases=0
+                        best_trim_from_start=true
                         echo "  Found direct repeat of length $repeat_len at both ends" >&2
                 fi
         done
         
+        # If no exact repeat found, check for repeats with extra bases at either end
+        if [ $best_repeat_len -eq 0 ]; then
+                echo "  No exact repeat found, checking for repeats with extra bases..." >&2
+                local best_extra_bases=0
+                local best_trim_from_start=true
+                
+                for ((extra_bases=1; extra_bases<=10; extra_bases++)); do
+                        for ((repeat_len=10; repeat_len<=max_repeat_len; repeat_len++)); do
+                                # Check for repeat with extra bases at the END (trim from start)
+                                local start_seq end_seq
+                                start_seq="${plasmid_seq:0:$repeat_len}"
+                                end_seq="${plasmid_seq: -$((repeat_len + extra_bases)):$repeat_len}"
+                                
+                                if [ "$start_seq" = "$end_seq" ]; then
+                                        best_repeat_len=$repeat_len
+                                        best_extra_bases=$extra_bases
+                                        best_trim_from_start=true
+                                        echo "  Found direct repeat of length $repeat_len with $extra_bases extra bases at END" >&2
+                                        break 2  # Break out of both loops
+                                fi
+                                
+                                # Check for repeat with extra bases at the START (trim from end)
+                                start_seq="${plasmid_seq:$extra_bases:$repeat_len}"
+                                end_seq="${plasmid_seq: -$repeat_len}"
+                                
+                                if [ "$start_seq" = "$end_seq" ]; then
+                                        best_repeat_len=$repeat_len
+                                        best_extra_bases=$extra_bases
+                                        best_trim_from_start=false
+                                        echo "  Found direct repeat of length $repeat_len with $extra_bases extra bases at START" >&2
+                                fi
+                        done
+                done
+        fi
+        
         if [ $best_repeat_len -gt 0 ]; then
-                echo "  Trimming $best_repeat_len bases from start (keeping end repeat)" >&2
-            
-                # Trim the repeat from the start, keep the end
                 local trimmed_seq
-                trimmed_seq="${plasmid_seq:$best_repeat_len}"
+                
+                if [ "$best_trim_from_start" = true ]; then
+                        # Extra bases at end: delete the end repeat + extra bases (keep start repeat)
+                        echo "  Trimming $((best_repeat_len + best_extra_bases)) bases from end (keeping start repeat)" >&2
+                        trimmed_seq="${plasmid_seq:0:-$((best_repeat_len + best_extra_bases))}"
+                else
+                        # Extra bases at start: delete the extra bases + start repeat (keep end repeat)
+                        echo "  Trimming $((best_repeat_len + best_extra_bases)) bases from start (keeping end repeat)" >&2
+                        trimmed_seq="${plasmid_seq:$((best_repeat_len + best_extra_bases))}"
+                fi
                 
                 # Write trimmed plasmid
                 local plasmid_header
@@ -264,7 +281,6 @@ trim_direct_repeats() {
                 echo "$plasmid_header" > "$output_file"
                 echo "$trimmed_seq" >> "$output_file"
                 
-                echo "  Direct repeat trimmed - new length: ${#trimmed_seq}" >&2
         else
                 echo "  No significant direct repeats found" >&2
                 cp "$plasmid_file" "$output_file"
@@ -275,15 +291,17 @@ trim_direct_repeats() {
 test_both_orientations() {
         local trimmed_plasmid="$1"
         local output_file="$2"
+        local temp_dir="$3"
         
         # Find the correct start coordinate (orientation already determined)
-        find_correct_start "$trimmed_plasmid" "$output_file"
+        find_correct_start "$trimmed_plasmid" "$output_file" "$temp_dir"
 }
 
 # Function to find correct start coordinate by BLASTing reference start against plasmid
 find_correct_start() {
         local plasmid_file="$1"
         local output_file="$2"
+        local temp_dir="$3"
         
         echo "  Finding correct start coordinate..." >&2
         
@@ -300,6 +318,13 @@ find_correct_start() {
                 -out "$blast_results" \
                 -outfmt "6 qseqid sseqid pident qcovs qstart qend sstart send slen qlen" \
                 -evalue 1e-10 -num_threads "$THREADS"
+        
+        # Debug: check BLAST results
+        if [ -s "$blast_results" ]; then
+                echo "  BLAST found alignments for reference start" >&2
+        else
+                echo "  No BLAST alignments found for reference start (this is normal if plasmid doesn't align to reference start)" >&2
+        fi
         
         if [ -s "$blast_results" ]; then
                 # Get best hit
@@ -343,7 +368,7 @@ find_correct_start() {
                         cp "$plasmid_file" "$output_file"
                 fi
         else
-                echo "  BLAST analysis failed" >&2
+                # No BLAST results found - this is normal for plasmids that don't align to reference start
                 cp "$plasmid_file" "$output_file"
         fi
         
@@ -363,11 +388,20 @@ get_better_orientation() {
         nucmer --prefix="${temp_dir}/fwd" "$REFERENCE" "$plasmid_file" >/dev/null 2>&1
         nucmer --prefix="${temp_dir}/rev" "$REFERENCE" "$temp_rev" >/dev/null 2>&1
         
-        # Get alignment coordinates and determine better orientation
-        if [ -s "${temp_dir}/fwd.delta" ] && [ -s "${temp_dir}/rev.delta" ]; then
-                local fwd_coords rev_coords
-                fwd_coords=$(show-coords -r -c -l "${temp_dir}/fwd.delta" | tail -1)
-                rev_coords=$(show-coords -r -c -l "${temp_dir}/rev.delta" | tail -1)
+                        # Get alignment coordinates and determine better orientation
+                if [ -s "${temp_dir}/fwd.delta" ] && [ -s "${temp_dir}/rev.delta" ]; then
+                        local fwd_coords rev_coords
+                        # Skip header lines and get the last actual coordinate line
+                        fwd_coords=$(show-coords -r -c -l "${temp_dir}/fwd.delta" 2>/dev/null | grep -v "^=" | grep -v "^NUCMER" | grep -v "\[S1\]" | grep -v "^$" | grep -v "^/" | tail -1)
+                        rev_coords=$(show-coords -r -c -l "${temp_dir}/rev.delta" 2>/dev/null | grep -v "^=" | grep -v "^NUCMER" | grep -v "\[S1\]" | grep -v "^$" | grep -v "^/" | tail -1)
+                        
+                        
+                        # Check if we have any actual coordinate data (not just headers or file paths)
+                        if [[ "$fwd_coords" =~ \[S1\] ]] || [[ "$rev_coords" =~ \[S1\] ]] || [ -z "$fwd_coords" ] || [ -z "$rev_coords" ] || [[ "$fwd_coords" =~ ^/ ]] || [[ "$rev_coords" =~ ^/ ]]; then
+                                echo "  No actual alignments found in MUMmer output, using forward orientation" >&2
+                                echo "forward"
+                                return
+                        fi
                 
                 if [ -n "$fwd_coords" ] && [ -n "$rev_coords" ]; then
                         # Parse coordinates: start2 < end2 = proper orientation
@@ -377,13 +411,23 @@ get_better_orientation() {
                         rev_start2=$(echo "$rev_coords" | cut -d'|' -f2 | awk '{print $1}')
                         rev_end2=$(echo "$rev_coords" | cut -d'|' -f2 | awk '{print $2}')
                         
-                        # Choose orientation with proper coordinate order (start2 < end2)
-                        if [ "$fwd_start2" -lt "$fwd_end2" ] && [ "$rev_start2" -gt "$rev_end2" ]; then
+                        
+                        # Check if we got valid coordinate data
+                        if [ -z "$fwd_start2" ] || [ -z "$fwd_end2" ] || [ -z "$rev_start2" ] || [ -z "$rev_end2" ]; then
+                                echo "  No valid coordinates found in MUMmer output, using forward orientation" >&2
                                 echo "forward"
-                        elif [ "$rev_start2" -lt "$rev_end2" ] && [ "$fwd_start2" -gt "$fwd_end2" ]; then
-                                echo "reverse"
+                        # Validate that coordinates are numeric before comparison
+                        elif [[ "$fwd_start2" =~ ^[0-9]+$ ]] && [[ "$fwd_end2" =~ ^[0-9]+$ ]] && [[ "$rev_start2" =~ ^[0-9]+$ ]] && [[ "$rev_end2" =~ ^[0-9]+$ ]]; then
+                                # Choose orientation with proper coordinate order (start2 < end2)
+                                if [ "$fwd_start2" -lt "$fwd_end2" ] && [ "$rev_start2" -gt "$rev_end2" ]; then
+                                        echo "forward"
+                                elif [ "$rev_start2" -lt "$rev_end2" ] && [ "$fwd_start2" -gt "$fwd_end2" ]; then
+                                        echo "reverse"
+                                else
+                                        echo "forward" # Fallback to forward if no clear orientation
+                                fi
                         else
-                                echo "forward" # Fallback to forward if no clear orientation
+                                echo "forward" # Fallback to forward if coordinates are not valid integers
                         fi
                 else
                         echo "forward" # Fallback to forward if no coordinates
@@ -394,10 +438,6 @@ get_better_orientation() {
         
         # Don't clean up temp files here - they might be needed by the caller
 }
-
-# Initialize statistics file
-STATS_FILE="${OUTPUT_DIR}/processing_statistics.tsv"
-echo -e "Sample_ID\tOriginal_length\tRepeat_bases_trimmed\tFinal_length\tBLAST_identity\tBLAST_coverage" > "$STATS_FILE"
 
 # Find all plasmid files in the directory
 echo "Scanning for plasmid files..." >&2

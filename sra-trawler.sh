@@ -159,8 +159,10 @@ Retry Options Explained:
                         everything a fresh start.
 
 Output Directories:
-    - reads_mapping_to_reference/     # Compressed FASTQ files for entries with >1x coverage
-    - alignments_mapping_to_reference/ # BAM alignment files for mapped reads with >1x coverage
+    - {organism}/                     # Top-level folder named after the organism from -o option
+        - {species}/                  # Subfolder named after each species with matches
+            - reads/                  # Compressed FASTQ files for entries with >1x coverage
+            - alignments/             # BAM alignment files for mapped reads with >1x coverage
     - {organism}sra_wgs.db            # SQLite database containing all SRA entries and status
 EOF
 }
@@ -661,8 +663,17 @@ process_sra_entry() {
     fi
     local organism_safe=$(sanitize_filename "$organism_name")
     
-    local output_dir="${organism_safe}_reads_mapping_to_${ref_name}"
-    local alignments_dir="${organism_safe}_alignments_mapping_to_${ref_name}"
+    # Get species name from database for subfolder naming
+    local species_name
+    species_name=$(execute_sqlite_cmd "$db_file" "SELECT organism FROM sra_entries WHERE sra_id = '$sra_id';" "true" 2>/dev/null)
+    species_name="${species_name:-Unknown_Species}"  # Default if not found
+    local species_safe=$(sanitize_filename "$species_name")
+    
+    # Create new folder structure: organism/species/reads and organism/species/alignments
+    local organism_dir="${organism_safe}"
+    local species_dir="${organism_dir}/${species_safe}"
+    local reads_dir="${species_dir}/reads"
+    local alignments_dir="${species_dir}/alignments"
     local temp_dir="./tmp_processing/${sra_id}"
 
     # Cleanup any existing cache files before starting
@@ -670,10 +681,10 @@ process_sra_entry() {
 
     # reset status to pending unless finished
     execute_sqlite_cmd "$db_file" "UPDATE sra_entries SET status = 'pending' WHERE status != 'finished';" >/dev/null
-    # Create directories
+    # Create only temporary processing directory up front
+    # NOTE: Organism/species output directories are created lazily
+    #       ONLY when a sample passes the coverage threshold
     mkdir -p "$temp_dir"
-    mkdir -p "$output_dir"
-    mkdir -p "$alignments_dir"
 
     # Get technology type
     local technology
@@ -694,7 +705,7 @@ process_sra_entry() {
     debug_log "[Slot $slot] Starting processing for $sra_id..."
 
     # Step 1: Prefetch
-    prefetch --max-size 50G "$sra_id" >/dev/null 2>&1 &
+    prefetch --max-size 100G "$sra_id" >/dev/null 2>&1 &
     local prefetch_pid=$!
     track_subprocess "$prefetch_pid" "prefetch_${sra_id}"
     wait "$prefetch_pid"
@@ -784,10 +795,13 @@ process_sra_entry() {
                 species_name="${species_name:-Unknown Organism}"  # Default if not found
                 pb push "VLE detected! $sra_id ($species_name) has ${coverage}x coverage"
                 
+                # Lazily create output directories ONLY after threshold is met
+                mkdir -p "$organism_dir" "$species_dir" "$reads_dir" "$alignments_dir"
+                
                 # Compress and save reads
                 for fastq_file in "$temp_dir"/*.fastq; do
                     local base_name=$(basename "$fastq_file")
-                    pigz -c "$fastq_file" > "$output_dir/${base_name}.gz"
+                    pigz -c "$fastq_file" > "$reads_dir/${base_name}.gz"
                     
                 done
                 
@@ -1381,7 +1395,7 @@ cleanup_on_exit() {
     rm -f ./*.tmp
     rm -f ./*.lock
    
-    # Note: [organism]_alignments_mapping_to_[reference_name] directory is preserved intentionally
+    # Note: {organism}/{species}/alignments directories are preserved intentionally
     # to keep the alignment files for successful mappings
     
     # Clean up SRA cache directory

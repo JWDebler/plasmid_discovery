@@ -18,6 +18,7 @@ usage() {
         echo "  --initial-ref, -r   Initial reference FASTA" >&2
         echo "  --max-rounds, -m    Maximum iteration rounds (default: 100 or env MAX_ROUNDS)" >&2
         echo "  --batch, -b         Process all sample pairs in directory (use with --sample <dir>)" >&2
+        echo "  --output-dir, -o    Output base directory (default: plasmids_extracted or env RESULTS_DIR)" >&2
         echo "  --pid-threshold     BLAST percent identity cutoff (default: ${BLAST_PID_THRESHOLD})" >&2
         echo "  --qcov-threshold    BLAST query coverage cutoff (default: ${BLAST_QCOV_THRESHOLD})" >&2
         echo "  --retry             Reprocess samples listed as failed (ignores failure cache)" >&2
@@ -78,6 +79,7 @@ MAX_ROUNDS_ARG=""
 BATCH_MODE=false
 # Retry mode: ignore previously failed samples and try again
 RETRY_MODE=false
+OUTPUT_DIR_ARG=""
 while [[ $# -gt 0 ]]; do
         case "$1" in
                 --sample|-s)
@@ -95,6 +97,10 @@ while [[ $# -gt 0 ]]; do
                 --batch|-b)
                         BATCH_MODE=true
                         shift
+                        ;;
+                --output-dir|-o)
+                        OUTPUT_DIR_ARG="${2:-}"
+                        shift 2
                         ;;
                 --pid-threshold)
                         BLAST_PID_THRESHOLD="${2:-}"
@@ -123,7 +129,13 @@ done
 # Resolve config from args/defaults
 RAW_DIR="."
 BATCH_SAMPLES=()
-RESULTS_DIR=${RESULTS_DIR:-"plasmids_extracted"}
+# Base results directory can be provided via --output-dir, else fallback to env RESULTS_DIR, else default
+RESULTS_DIR_DEFAULT=${RESULTS_DIR:-"plasmids_extracted"}
+if [ -n "${OUTPUT_DIR_ARG}" ]; then
+        RESULTS_DIR="${OUTPUT_DIR_ARG}"
+else
+        RESULTS_DIR="${RESULTS_DIR_DEFAULT}"
+fi
 WORKING_DIR="${RESULTS_DIR}/working"  # New working directory for individual samples
 PLASMIDS_DIR="${RESULTS_DIR}/plasmids"  # Directory for final plasmids
 READS_DIR="${RESULTS_DIR}/reads"  # Directory for final reads
@@ -353,12 +365,12 @@ detect_plateau() {
                 return 0  # Plateau detected
         fi
         
-        # Check if growth has slowed significantly (within 1% of previous)
-        local growth_rate_1=$(echo "scale=4; (${last_3_sizes[1]} - ${last_3_sizes[0]}) / ${last_3_sizes[0]}" | bc -l 2>/dev/null || echo "0")
-        local growth_rate_2=$(echo "scale=4; (${last_3_sizes[2]} - ${last_3_sizes[1]}) / ${last_3_sizes[1]}" | bc -l 2>/dev/null || echo "0")
+        # Check if growth has slowed significantly (less than 100 bp growth for 2 consecutive rounds)
+        local growth_1=$((last_3_sizes[1] - last_3_sizes[0]))
+        local growth_2=$((last_3_sizes[2] - last_3_sizes[1]))
         
-        # If growth rate is very small (< 0.01 or 1%) for 2 consecutive rounds, consider it a plateau
-        if (( $(echo "$growth_rate_1 < 0.01" | bc -l) )) && (( $(echo "$growth_rate_2 < 0.01" | bc -l) )); then
+        # If growth is very small (< 100 bp) for 2 consecutive rounds, consider it a plateau
+        if [ ${growth_1} -lt 100 ] && [ ${growth_2} -lt 100 ]; then
                 return 0  # Plateau detected
         fi
         
@@ -441,6 +453,7 @@ process_sample() {
         local largest_fa=""
         local found_good_blast_hit=false  # Track if we found any good BLAST hit
         local found_good_np_blast_hit=false  # Track if a good BLAST hit came from non-plasmid SPAdes
+        local plateau_detected=false  # Track if we exited due to plateau detection
         
         # NEW: Read file size tracking variables
         local prev_read_size=0
@@ -489,25 +502,30 @@ process_sample() {
                         
                         # Use seqkit to fix paired reads (this will ensure equal counts)
                         seqkit pair -1 "${r1_file}.backup" -2 "${r2_file}.backup" -o "${reads_dir}/round${round}.fixed" 2>"${log_dir}/round${round}.seqkit_fix.log"
-                        
-                        if [ $? -eq 0 ] && [ -f "${reads_dir}/round${round}.fixed.1.fastq.gz" ] && [ -f "${reads_dir}/round${round}.fixed.2.fastq.gz" ]; then
-                            # Replace original files with fixed versions
-                            mv "${reads_dir}/round${round}.fixed.1.fastq.gz" "${r1_file}"
-                            mv "${reads_dir}/round${round}.fixed.2.fastq.gz" "${r2_file}"
-                            
-                            # Check the fixed counts
-                            local fixed_r1_count=$(seqkit stats -T "${r1_file}" | tail -n1 | cut -f4)
-                            local fixed_r2_count=$(seqkit stats -T "${r2_file}" | tail -n1 | cut -f4)
-                            echo "Round ${round}:    Fixed! R1 reads: ${fixed_r1_count}, R2 reads: ${fixed_r2_count}" >&2
+
+                        # Prefer explicit fixed outputs; otherwise handle seqkit-created *.paired.backup cases
+                        if [ -f "${reads_dir}/round${round}.fixed.1.fastq.gz" ] && [ -f "${reads_dir}/round${round}.fixed.2.fastq.gz" ]; then
+                            mv -f "${reads_dir}/round${round}.fixed.1.fastq.gz" "${r1_file}"
+                            mv -f "${reads_dir}/round${round}.fixed.2.fastq.gz" "${r2_file}"
+                        elif [ -f "${r1_file}.paired.backup" ] && [ -f "${r2_file}.paired.backup" ]; then
+                            # Some environments/tools generate *.paired.backup as the corrected files
+                            mv -f "${r1_file}.paired.backup" "${r1_file}"
+                            mv -f "${r2_file}.paired.backup" "${r2_file}"
                         else
-                            echo "Round ${round}:    ERROR - Failed to fix paired reads with seqkit. Using original files." >&2
-                            # Restore original files
-                            mv "${r1_file}.backup" "${r1_file}"
-                            mv "${r2_file}.backup" "${r2_file}"
+                            echo "Round ${round}:    ERROR - Expected fixed paired files not found. Restoring originals." >&2
+                            mv -f "${r1_file}.backup" "${r1_file}"
+                            mv -f "${r2_file}.backup" "${r2_file}"
                         fi
+
+                        # Check the fixed counts
+                        local fixed_r1_count=$(seqkit stats -T "${r1_file}" | tail -n1 | cut -f4)
+                        local fixed_r2_count=$(seqkit stats -T "${r2_file}" | tail -n1 | cut -f4)
+                        echo "Round ${round}:    Fixed! R1 reads: ${fixed_r1_count}, R2 reads: ${fixed_r2_count}" >&2
                         
-                        # Clean up backup files
-                        rm -f "${r1_file}.backup" "${r2_file}.backup"
+                        # Clean up backup and intermediate files if present
+                        rm -f "${r1_file}.backup" "${r2_file}.backup" \
+                              "${r1_file}.paired.backup" "${r2_file}.paired.backup" \
+                              "${reads_dir}/round${round}.fixed.1.fastq.gz" "${reads_dir}/round${round}.fixed.2.fastq.gz"
                     else
                         echo "Round ${round}:    Paired read files have equal counts ✓" >&2
                     fi
@@ -912,6 +930,7 @@ process_sample() {
                 # NEW: Check for plateau in plasmid size (replaces max rounds logic)
                 if detect_plateau "${plasmid_size_history[@]}"; then
                         echo "Round ${round}: Plateau detected in plasmid size growth. Terminating optimization." >&2
+                        plateau_detected=true
                         break
                 fi
                 
@@ -925,12 +944,14 @@ process_sample() {
         echo "============================================================================================================" >&2
         if [ ${round} -gt ${MAX_ROUNDS} ]; then
                 echo "========= Sample ${sample} complete (MAX ROUNDS REACHED). Final largest contig length: ${prev_max_len} =========" >&2
+        elif [ "${plateau_detected}" = true ]; then
+                echo "========= Sample ${sample} complete (PLATEAU DETECTED). Final largest contig length: ${prev_max_len} =========" >&2
         elif [ ${no_growth_cycles} -ge ${max_no_growth_cycles} ] && [ "${found_good_blast_hit}" = true ]; then
                 echo "========= Sample ${sample} complete (NO GROWTH BUT GOOD BLAST HIT). Final largest contig length: ${prev_max_len} =========" >&2
         elif [ ${no_growth_cycles} -ge ${max_no_growth_cycles} ]; then
                 echo "========= Sample ${sample} complete (NO GROWTH DETECTED). Terminated after ${no_growth_cycles} no-growth cycles =========" >&2
         else
-                echo "========= Sample ${sample} complete (PLATEAU DETECTED). Final largest contig length: ${prev_max_len} =========" >&2
+                echo "========= Sample ${sample} complete (UNKNOWN REASON). Final largest contig length: ${prev_max_len} =========" >&2
         fi
         echo "============================================================================================================" >&2
         
@@ -941,15 +962,24 @@ process_sample() {
                 echo "Renamed plasmid copied to: ${PLASMIDS_DIR}/${sample}_plasmid.fasta" >&2
                 
                 # Copy the last used reads to the reads directory
-                local final_round=$((round - 1))
-                if [ ${final_round} -gt 0 ]; then
+                # Prefer current round if files exist (loop exited via break), else fall back to previous round
+                local final_round=${round}
+                if ! [ -f "${reads_dir}/round${final_round}.1.fastq.gz" ] || ! [ -f "${reads_dir}/round${final_round}.2.fastq.gz" ] || ! [ -f "${reads_dir}/round${final_round}.s.fastq.gz" ]; then
+                        final_round=$((round - 1))
+                fi
+                if [ ${final_round} -gt 0 ] && \
+                   [ -f "${reads_dir}/round${final_round}.1.fastq.gz" ] && \
+                   [ -f "${reads_dir}/round${final_round}.2.fastq.gz" ] && \
+                   [ -f "${reads_dir}/round${final_round}.s.fastq.gz" ]; then
                         cp "${reads_dir}/round${final_round}.1.fastq.gz" "${READS_DIR}/${sample}_final_round_1.fastq.gz"
                         cp "${reads_dir}/round${final_round}.2.fastq.gz" "${READS_DIR}/${sample}_final_round_2.fastq.gz"
                         cp "${reads_dir}/round${final_round}.s.fastq.gz" "${READS_DIR}/${sample}_final_round_s.fastq.gz"
-                        echo "Final round reads copied to reads directory:" >&2
+                        echo "Final round reads copied to reads directory from round ${final_round}:" >&2
                         echo "  - ${READS_DIR}/${sample}_final_round_1.fastq.gz" >&2
                         echo "  - ${READS_DIR}/${sample}_final_round_2.fastq.gz" >&2
                         echo "  - ${READS_DIR}/${sample}_final_round_s.fastq.gz" >&2
+                else
+                        echo "WARNING: Unable to locate final round read files for copying (checked rounds ${round} and $((round-1)))." >&2
                 fi
                 
                 # Mark sample as successfully processed
@@ -985,7 +1015,7 @@ for sample in "${BATCH_SAMPLES[@]}"; do
         # Check if sample was already processed
         if is_sample_processed "$sample"; then
                 echo "Sample ${sample} was already processed. Skipping." >&2
-                ((skipped_samples++))
+                skipped_samples=$((skipped_samples + 1))
         else
                 # Process the sample and capture the exit code
                 echo "Starting to process sample: ${sample}" >&2
@@ -996,7 +1026,7 @@ for sample in "${BATCH_SAMPLES[@]}"; do
                         echo "Sample ${sample} processed successfully." >&2
                 else
                         echo "Failed to process sample: ${sample}" >&2
-                        ((failed_samples++))
+                        failed_samples=$((failed_samples + 1))
                 fi
                 set -e  # Re-enable exit on error
         fi
