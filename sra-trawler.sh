@@ -142,11 +142,8 @@ Examples:
     # Resume and retry ALL failed entries (recommended for systematic fixes)
     $(basename "$0") -d existing.db -f reference.fasta -R
     
-    # Update existing database with new entries from CSV file
-    $(basename "$0") -c new_entries.csv -d existing.db -f reference.fasta
-    
-    # Update existing database with new entries for a specific organism
-    $(basename "$0") -d existing.db -o "Aspergillus" -f reference.fasta
+    # Update existing database with new entries for an organism
+    $(basename "$0") -c data.csv -d existing.db -f reference.fasta
     
     # Run with debug output enabled
     $(basename "$0") -d existing.db -f reference.fasta -D
@@ -1555,7 +1552,7 @@ main() {
         print_db_stats "$db_file"
         
         # If organism is specified, update database with new entries
-        if [[ -n "$organism" ]] && [[ "$organism" != "fungi" ]]; then
+        if [[ -n "$organism" ]]; then
             info_log "Fetching new data from SRA for organism: $organism..."
             local organism_safe=$(sanitize_filename "$organism")
             local temp_csv="${organism_safe}temp_sra_wgs.csv"
