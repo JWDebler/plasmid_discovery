@@ -175,9 +175,29 @@ if [ -n "$SAMPLE_ARG" ]; then
                 BATCH_SAMPLES=("$SAMPLE")
             fi
         else
-            echo "Input is a single sample ID: ${SAMPLE_ARG}" >&2
-            SAMPLE="$SAMPLE_ARG"
-            BATCH_SAMPLES=("$SAMPLE")
+            # Check if the argument contains a path (e.g., "reads/SRR32106019")
+            if [[ "$SAMPLE_ARG" == */* ]]; then
+                # Extract directory and sample ID from path
+                sample_dir="$(dirname "$SAMPLE_ARG")"
+                sample_id="$(basename "$SAMPLE_ARG")"
+                
+                # Check if the directory exists
+                if [ -d "$sample_dir" ]; then
+                    RAW_DIR="$(cd "$sample_dir" && pwd)"
+                    SAMPLE="$sample_id"
+                    echo "Input is a single sample ID with directory path: ${SAMPLE_ARG}" >&2
+                    echo "Extracted directory: ${RAW_DIR}" >&2
+                    echo "Extracted sample ID: ${SAMPLE}" >&2
+                    BATCH_SAMPLES=("$SAMPLE")
+                else
+                    echo "ERROR: Directory '${sample_dir}' does not exist for sample path '${SAMPLE_ARG}'" >&2
+                    exit 1
+                fi
+            else
+                echo "Input is a single sample ID: ${SAMPLE_ARG}" >&2
+                SAMPLE="$SAMPLE_ARG"
+                BATCH_SAMPLES=("$SAMPLE")
+            fi
         fi
 else
         echo "ERROR: No sample specified. Please provide a sample using --sample or -s option." >&2
