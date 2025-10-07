@@ -1048,7 +1048,7 @@ for sample in "${BATCH_SAMPLES[@]}"; do
                         echo "Failed to process sample: ${sample}" >&2
                         failed_samples=$((failed_samples + 1))
                 fi
-                set -e  # Re-enable exit on error
+                set -e  # Re-enable exit on error.
         fi
         
         current_sample_num=$((current_sample_num + 1))
