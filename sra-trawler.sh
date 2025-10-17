@@ -805,13 +805,6 @@ process_sra_entry() {
                     
                 done
                 
-                # Save the alignment file (BAM) for mapped reads
-                if [[ -f "${temp_dir}/${sra_id}_mapped.bam" ]]; then
-                    local bam_filename="${sra_id}_mapped.bam"
-                    cp "${temp_dir}/${sra_id}_mapped.bam" "$alignments_dir/${bam_filename}"
-                    info_log "[Slot $slot] Saved alignment file: $alignments_dir/${bam_filename}"
-                fi
-                
                 execute_sqlite_cmd "$db_file" "UPDATE sra_entries SET status = 'finished', message = 'Coverage: ${coverage}x' WHERE sra_id = '$sra_id';" >/dev/null
                 info_log "[Slot $slot] $sra_id processed successfully with ${coverage}x coverage"
             else
@@ -874,6 +867,19 @@ process_sra_entry() {
         cleanup_sra_cache "$sra_id"
         rm -rf "$temp_dir"
         return 1
+    fi
+
+    # Save the alignment file (BAM) for mapped reads if coverage was sufficient
+    # This happens after the mapping pipeline completes to avoid race conditions
+    local status_check=$(execute_sqlite_cmd "$db_file" "SELECT status FROM sra_entries WHERE sra_id = '$sra_id';" "true" 2>/dev/null)
+    if [[ "$status_check" == "finished" ]] && [[ -f "${temp_dir}/${sra_id}_mapped.bam" ]]; then
+        # Get the message to check if it was a successful coverage
+        local message_check=$(execute_sqlite_cmd "$db_file" "SELECT message FROM sra_entries WHERE sra_id = '$sra_id';" "true" 2>/dev/null)
+        if [[ "$message_check" == *"Coverage:"* ]]; then
+            local bam_filename="${sra_id}_mapped.bam"
+            cp "${temp_dir}/${sra_id}_mapped.bam" "$alignments_dir/${bam_filename}"
+            info_log "[Slot $slot] Saved alignment file: $alignments_dir/${bam_filename}"
+        fi
     fi
 
     # Increment the counter atomically
