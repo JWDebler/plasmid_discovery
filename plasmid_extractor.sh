@@ -4,7 +4,6 @@
 
 
 
-SPADES_BIN=${SPADES_BIN:-/opt/spades/SPAdes-4.2.0-Linux/bin/spades.py}
 KMER_SET=${KMER_SET:-21,33,55,77,99,127}
 MAX_ROUNDS=${MAX_ROUNDS:-100}
 
@@ -320,7 +319,7 @@ check_required_tools() {
         done
         
         # Check for SPAdes
-        if [ ! -f "${SPADES_BIN}" ] && ! command -v spades.py >/dev/null 2>&1; then
+        if [ ! -f "spades.py" ] && ! command -v spades.py >/dev/null 2>&1; then
                 missing_tools+=("spades.py")
         fi
         
@@ -622,7 +621,7 @@ process_sample() {
                 
                 # Attempt plasmid assembly
                 echo "Round ${round}: Running SPAdes --plasmid..."
-                "${SPADES_BIN}" \
+                "spades.py" \
                         -k ${KMER_SET} \
                         --plasmid \
                         --threads $(nproc) \
@@ -641,7 +640,7 @@ process_sample() {
                         mkdir -p "${outdir_np}"
                         echo "Round ${round}:    NO SUCCESS."
                         echo "Round ${round}: Running SPAdes non-plasmid..."
-                        "${SPADES_BIN}" \
+                        "spades.py" \
                                 -k ${KMER_SET} \
                                 --threads $(nproc) \
                                 -1 "${reads_dir}/round${round}.1.fastq.gz" \
@@ -668,7 +667,7 @@ process_sample() {
                                     local subsampled_reads_dir=$(subsample_reads_for_assembly "${reads_dir}" "${round}" "${coverage}" "${sample}")
                                     
                                     # Try assembly again with subsampled reads
-                                    "${SPADES_BIN}" \
+                                    "spades.py" \
                                             -k ${KMER_SET} \
                                             --threads $(nproc) \
                                             -1 "${subsampled_reads_dir}/round${round}.1.fastq.gz" \
@@ -761,7 +760,7 @@ process_sample() {
                                  for coverage in "${coverage_levels[@]}"; do
                                      echo "Round ${round}:    Trying ${coverage}x coverage subsampling for non-plasmid assembly (BLAST-fail path)..." >&2
                                      local subsampled_reads_dir=$(subsample_reads_for_assembly "${reads_dir}" "${round}" "${coverage}" "${sample}")
-                                     "${SPADES_BIN}" \
+                                     "spades.py" \
                                              -k ${KMER_SET} \
                                              --threads $(nproc) \
                                              -1 "${subsampled_reads_dir}/round${round}.1.fastq.gz" \
