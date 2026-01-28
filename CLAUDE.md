@@ -24,9 +24,11 @@ Downloads and screens SRA entries for plasmid sequences. Manages a SQLite databa
 **Key functionality:**
 - Downloads SRA entries via organism queries or CSV input
 - Maps reads to reference genome using BWA-mem2 or minimap2
+- Filters alignments to keep only primary alignments (excludes secondary/supplementary alignments with NNNNNN sequences)
 - Retains only samples with >1x coverage
 - Saves mapped reads and BAM alignments
 - Tracks status in SQLite database with retry logic
+- Optional push notifications when matches are found
 
 **Common commands:**
 ```bash
@@ -41,6 +43,9 @@ Downloads and screens SRA entries for plasmid sequences. Manages a SQLite databa
 
 # Update database with new CSV entries
 ./sra-trawler.sh -c new_entries.csv -d existing.db -f reference.fasta
+
+# Enable push notifications with custom message
+./sra-trawler.sh -f reference.fasta -n "Plasmid" -m 5
 ```
 
 **Database schema:**

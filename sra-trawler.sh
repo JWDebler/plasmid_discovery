@@ -831,6 +831,11 @@ process_sra_entry() {
     local coverage_pid=$!
 
     # Map based on technology
+    # Note: samtools -F 2308 filters out:
+    #   - Flag 4: unmapped reads
+    #   - Flag 256: secondary alignments (prevents NNNNNN sequences)
+    #   - Flag 2048: supplementary alignments
+    # This ensures only primary alignments are kept
     local redirect_output="/dev/null"
     [[ "$DEBUG_MODE" == "true" ]] && redirect_output="/dev/stderr"
 
@@ -838,13 +843,13 @@ process_sra_entry() {
         "illumina")
             if [[ ${#input_files[@]} -eq 1 ]]; then
                 bwa-mem2 mem -t "$threads" "$reference" "${input_files[0]}" 2>$redirect_output | \
-                samtools view -@ "$threads" -b -F 4 | \
+                samtools view -@ "$threads" -b -F 2308 | \
                 tee >(samtools sort -@ "$threads" -o "${temp_dir}/${sra_id}_mapped.bam" 2>$redirect_output) | \
                 samtools sort -@ "$threads" 2>$redirect_output | \
                 samtools depth -a - > "$coverage_pipe"
             else
                 bwa-mem2 mem -t "$threads" "$reference" "${input_files[@]}" 2>$redirect_output | \
-                samtools view -@ "$threads" -b -F 4 | \
+                samtools view -@ "$threads" -b -F 2308 | \
                 tee >(samtools sort -@ "$threads" -o "${temp_dir}/${sra_id}_mapped.bam" 2>$redirect_output) | \
                 samtools sort -@ "$threads" 2>$redirect_output | \
                 samtools depth -a - > "$coverage_pipe"
@@ -852,14 +857,14 @@ process_sra_entry() {
             ;;
         "nanopore"|"iontorrent"|"454"|"capillary")
             minimap2 -ax map-ont -t "$threads" "$reference" "${input_files[@]}" 2>$redirect_output | \
-            samtools view -@ "$threads" -b -F 4 | \
+            samtools view -@ "$threads" -b -F 2308 | \
             tee >(samtools sort -@ "$threads" -o "${temp_dir}/${sra_id}_mapped.bam" 2>$redirect_output) | \
             samtools sort -@ "$threads" 2>$redirect_output | \
             samtools depth -a - > "$coverage_pipe"
             ;;
         "pacbio")
             minimap2 -ax map-pb -t "$threads" "$reference" "${input_files[@]}" 2>$redirect_output | \
-            samtools view -@ "$threads" -b -F 4 | \
+            samtools view -@ "$threads" -b -F 2308 | \
             tee >(samtools sort -@ "$threads" -o "${temp_dir}/${sra_id}_mapped.bam" 2>$redirect_output) | \
             samtools sort -@ "$threads" 2>$redirect_output | \
             samtools depth -a - > "$coverage_pipe"

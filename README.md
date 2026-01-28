@@ -16,6 +16,7 @@ The SRA Trawler script is designed to systematically search through the NCBI SRA
 ### Purpose
 - Downloads all SRA entries for a given organism queries or CSV input
 - Maps downloaded sequencing reads to a reference genome
+- Filters alignments to keep only primary alignments (excludes secondary/supplementary alignments)
 - Identifies entries with sufficient coverage (>1x) as potential plasmid sources
 - Saves only reads that map to the reference for downstream analysis
 - Maintains a SQLite database to track processing status
