@@ -2,11 +2,11 @@
 
 # VLE Mapper Script
 # This script downloads SRA entries, maps reads to a reference genome,
-# and identifies entries with sufficient coverage (>1x) as potential VLEs.
-# 
+# and identifies entries with sufficient coverage as potential VLEs.
+#
 # New functionality: During read mapping, only reads mapping to the template
 # are retained, and alignment files (BAM) are saved to reference-named
-# folders for successful mappings with >1x coverage.
+# folders for successful mappings that meet the coverage threshold.
 # 
 # CSV processing enhancements: Supports SampleName, LibraryName,
 # and CenterName fields. Sample names and library names are preserved
@@ -117,10 +117,16 @@ Options:
                         Downloaded SRA entries will be extracted, mapped to the reference,
                         filtered for mapped reads only, and analyzed for coverage.
                         Alignment files (BAM) are saved to 'alignments_mapping_to_reference'
-                        folder for entries with >1x coverage.
+                        folder for entries that meet the minimum coverage threshold.
                         CSV processing supports SampleName, LibraryName, and CenterName fields.
                         Sample names and library names are preserved exactly as they appear
                         in the CSV (including underscores).
+    -m, --min-coverage NUM  Minimum coverage threshold for saving reads (default: 1)
+                        Only entries with coverage >= this value will have reads and
+                        alignments saved. Must be a positive number.
+    -n, --notify STR   Enable push notifications with custom detection message string
+                        (e.g., "Plasmid" will notify "Plasmid detected! ...")
+                        Requires 'pb' tool to be installed
     -D, --debug        Enable debug mode for verbose output
 
 Examples:
@@ -148,6 +154,9 @@ Examples:
     # Run with debug output enabled
     $(basename "$0") -d existing.db -f reference.fasta -D
 
+    # Enable push notifications with custom message
+    $(basename "$0") -f reference.fasta -n "Plasmid"
+
 Retry Options Explained:
     -r (--retry):        Selective retry - only retries entries that failed during
                         download/prefetch/extraction. Use when you had network issues
@@ -161,8 +170,8 @@ Retry Options Explained:
 Output Directories:
     - {organism}/                     # Top-level folder named after the organism from -o option
         - {species}/                  # Subfolder named after each species with matches
-            - reads/                  # Compressed FASTQ files for entries with >1x coverage
-            - alignments/             # BAM alignment files for mapped reads with >1x coverage
+            - reads/                  # Compressed FASTQ files for entries meeting coverage threshold
+            - alignments/             # BAM alignment files for mapped reads meeting coverage threshold
     - {organism}sra_wgs.db            # SQLite database containing all SRA entries and status
 EOF
 }
@@ -645,6 +654,8 @@ process_sra_entry() {
     local total_entries="$5"
     local reference="$6"
     local csv_organism_name="$7"  # New parameter for organism name from CSV filename
+    local min_coverage="$8"  # Minimum coverage threshold
+    local notify_string="$9"  # Optional notification string
     local threads="$(nproc)"
     
     # Extract reference filename without path and extension for folder naming
@@ -787,14 +798,18 @@ process_sra_entry() {
             coverage="${coverage:-0.00}"
             
             info_log "[Slot $slot] Coverage for $sra_id: ${coverage}x"
-            
-            if (( $(echo "$coverage > 1" | bc -l) )); then
+
+            if (( $(echo "$coverage >= $min_coverage" | bc -l) )); then
                 # Get organism name from database
                 local species_name
                 species_name=$(execute_sqlite_cmd "$db_file" "SELECT organism FROM sra_entries WHERE sra_id = '$sra_id';")
                 species_name="${species_name:-Unknown Organism}"  # Default if not found
-                pb push "VLE detected! $sra_id ($species_name) has ${coverage}x coverage"
-                
+
+                # Send push notification if enabled
+                if [[ -n "$notify_string" ]]; then
+                    pb push "${notify_string} detected! $sra_id ($species_name) has ${coverage}x coverage"
+                fi
+
                 # Lazily create output directories ONLY after threshold is met
                 mkdir -p "$organism_dir" "$species_dir" "$reads_dir" "$alignments_dir"
                 
@@ -906,7 +921,9 @@ start_downloads() {
     local max_concurrent="$2"
     local reference="$3"  # Optional reference file
     local csv_organism_name="$4"  # Optional organism name from CSV filename
-    
+    local min_coverage="$5"  # Minimum coverage threshold
+    local notify_string="$6"  # Optional notification string
+
     debug_log "Starting processing with $max_concurrent concurrent processes..."
     
     # Setup trap to cleanup on exit
@@ -941,7 +958,7 @@ start_downloads() {
     
     # Start initial batch of processes
     for ((i=1; i<=max_concurrent && i<=total_entries; i++)); do
-        process_sra_entry "${sra_ids[$next_index]}" "$db_file" "$i" "$counter_file" "$total_entries" "$reference" "$csv_organism_name" &
+        process_sra_entry "${sra_ids[$next_index]}" "$db_file" "$i" "$counter_file" "$total_entries" "$reference" "$csv_organism_name" "$min_coverage" "$notify_string" &
         pid=$!
         pids+=("$pid")
         info_log "[Slot $i] Started processing ${sra_ids[$next_index]}   (PID: $pid)"
@@ -960,7 +977,7 @@ start_downloads() {
                 
                 # Start a new process if there are more entries
                 if ((next_index < total_entries)); then
-                    process_sra_entry "${sra_ids[$next_index]}" "$db_file" "$((i+1))" "$counter_file" "$total_entries" "$reference" "$csv_organism_name" &
+                    process_sra_entry "${sra_ids[$next_index]}" "$db_file" "$((i+1))" "$counter_file" "$total_entries" "$reference" "$csv_organism_name" "$min_coverage" "$notify_string" &
                     pid=$!
                     pids+=("$pid")
                     info_log "[Slot $((i+1))] Started processing ${sra_ids[$next_index]}   (PID: $pid)"
@@ -1122,6 +1139,16 @@ cleanup_sra_cache() {
 # Function to check if a command exists
 command_exists() {
     command -v "$1" >/dev/null 2>&1
+}
+
+# Function to check if pb is installed
+check_pb_installed() {
+    if ! command_exists pb; then
+        error_log "ERROR: 'pb' tool is not installed but --notify option was specified"
+        error_log "Please install 'pb' from https://github.com/pushbullet/pushbullet-bash or remove --notify option"
+        return 1
+    fi
+    return 0
 }
 
 # Function to check required tools
@@ -1425,7 +1452,9 @@ main() {
     local retry_failed="false"
     local retry_all="false"
     local reference_file=""
-    
+    local min_coverage=1  # Default minimum coverage threshold
+    local notify_string=""  # Empty by default (notifications disabled)
+
     # Set up the main trap for cleanup
     trap 'cleanup_on_exit "$db_file"' INT TERM
     
@@ -1491,6 +1520,24 @@ main() {
                 DEBUG_MODE=true
                 shift
                 ;;
+            -m|--min-coverage)
+                if [[ -n $2 ]]; then
+                    min_coverage=$2
+                    shift 2
+                else
+                    error_log "--min-coverage requires a numeric value"
+                    exit 1
+                fi
+                ;;
+            -n|--notify)
+                if [[ -n $2 ]]; then
+                    notify_string=$2
+                    shift 2
+                else
+                    error_log "--notify requires a string value"
+                    exit 1
+                fi
+                ;;
             *)
                 error_log "Unknown argument: $1"
                 print_usage
@@ -1499,6 +1546,14 @@ main() {
         esac
     done
     
+    # Check if pb is installed when notify option is used
+    if [[ -n "$notify_string" ]]; then
+        if ! check_pb_installed; then
+            exit 1
+        fi
+        info_log "Push notifications enabled with message: \"${notify_string} detected...\""
+    fi
+
     # Check for reference file requirement
     if [[ -z "$reference_file" ]]; then
         error_log "ERROR: No reference file provided. A reference file is required for read mapping and coverage calculation."
@@ -1591,9 +1646,9 @@ main() {
                 
                 # Print updated statistics
                 print_db_stats "$db_file"
-                
+
                 # Start concurrent processing for new entries
-                start_downloads "$db_file" "$max_concurrent" "$reference_file" "$organism"
+                start_downloads "$db_file" "$max_concurrent" "$reference_file" "$organism" "$min_coverage" "$notify_string"
             else
                 info_log "No new entries found"
                 rm -f "$temp_csv"
@@ -1603,7 +1658,7 @@ main() {
                 
                 # Continue with existing entries
                 info_log "Continuing with existing entries..."
-                start_downloads "$db_file" "$max_concurrent" "$reference_file" "$organism"
+                start_downloads "$db_file" "$max_concurrent" "$reference_file" "$organism" "$min_coverage" "$notify_string"
             fi
         else
             # If no organism specified, just process existing entries
@@ -1614,7 +1669,7 @@ main() {
                 db_organism_name="${BASH_REMATCH[1]}"
                 info_log "Extracted organism name from database filename: $db_organism_name"
             fi
-            start_downloads "$db_file" "$max_concurrent" "$reference_file" "$db_organism_name"
+            start_downloads "$db_file" "$max_concurrent" "$reference_file" "$db_organism_name" "$min_coverage" "$notify_string"
         fi
         exit 0
     fi
@@ -1660,10 +1715,10 @@ main() {
         print_db_stats "$db_file"
         
         # Start concurrent processing
-        start_downloads "$db_file" "$max_concurrent" "$reference_file" "$csv_organism_name"
+        start_downloads "$db_file" "$max_concurrent" "$reference_file" "$csv_organism_name" "$min_coverage" "$notify_string"
         exit 0
     fi
-    
+
     # Otherwise, fetch data for the specified organism
     local organism_safe=$(sanitize_filename "$organism")
     db_file="${organism_safe}_sra_wgs.db"
@@ -1714,9 +1769,9 @@ main() {
     
     # Print database statistics
     print_db_stats "$db_file"
-    
+
     # Start concurrent processing
-    start_downloads "$db_file" "$max_concurrent" "$reference_file" "$organism"
+    start_downloads "$db_file" "$max_concurrent" "$reference_file" "$organism" "$min_coverage" "$notify_string"
 }
 
 # Run the script
