@@ -2,6 +2,16 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Git Workflow Preferences
+
+**IMPORTANT:** Do NOT automatically push to GitHub after making commits. Always:
+1. Make code changes
+2. Create local commits
+3. **WAIT** for explicit user approval before pushing
+4. Only run `git push` when the user explicitly requests it
+
+This allows local testing before changes go to the remote repository.
+
 ## Overview
 
 This repository contains a plasmid discovery pipeline that trawls through NCBI SRA databases to identify and extract plasmid sequences from sequencing reads. The pipeline consists of three main bash scripts that work sequentially or independently.
