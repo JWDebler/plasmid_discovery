@@ -716,7 +716,7 @@ process_sra_entry() {
     debug_log "[Slot $slot] Starting processing for $sra_id..."
 
     # Step 1: Prefetch
-    prefetch --max-size 100G "$sra_id" >/dev/null 2>&1 &
+    prefetch --max-size 50G "$sra_id" >/dev/null 2>&1 &
     local prefetch_pid=$!
     track_subprocess "$prefetch_pid" "prefetch_${sra_id}"
     wait "$prefetch_pid"
