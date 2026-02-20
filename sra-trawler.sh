@@ -690,8 +690,6 @@ process_sra_entry() {
     # Cleanup any existing cache files before starting
     cleanup_sra_cache "$sra_id"
 
-    # reset status to pending unless finished
-    execute_sqlite_cmd "$db_file" "UPDATE sra_entries SET status = 'pending' WHERE status != 'finished';" >/dev/null
     # Create only temporary processing directory up front
     # NOTE: Organism/species output directories are created lazily
     #       ONLY when a sample passes the coverage threshold
@@ -1118,12 +1116,68 @@ print_db_stats() {
     info_log "  Other: $other"
 }
 
+# Function to dynamically detect SRA cache directory
+get_sra_cache_dir() {
+    local sra_root=""
+    local config_file="$HOME/.ncbi/user-settings.mkfg"
+
+    debug_log "Detecting SRA cache directory..."
+
+    # First, try to read from NCBI configuration file
+    if [[ -f "$config_file" ]] && [[ -r "$config_file" ]]; then
+        debug_log "Reading SRA configuration from: $config_file"
+        # Extract repository root from config file
+        sra_root=$(grep -E "^/repository/user/main/public/root\s*=" "$config_file" 2>/dev/null | \
+                  sed 's/^[^=]*=\s*"\([^"]*\)".*/\1/' | \
+                  head -1)
+
+        if [[ -n "$sra_root" ]] && [[ -d "$sra_root" ]]; then
+            debug_log "Found SRA repository root in config: $sra_root"
+            echo "${sra_root}/sra"
+            return 0
+        elif [[ -n "$sra_root" ]]; then
+            debug_log "Config specifies SRA root '$sra_root' but directory doesn't exist"
+        fi
+    else
+        debug_log "SRA configuration file not found or not readable: $config_file"
+    fi
+
+    # Fallback: common SRA cache locations
+    debug_log "Trying fallback SRA cache locations..."
+    local fallback_locations=(
+        "/data/sra-cache/sra"
+        "$HOME/ncbi/public/sra"
+        "$HOME/.ncbi/public/sra"
+        "/tmp/sra"
+    )
+
+    for location in "${fallback_locations[@]}"; do
+        debug_log "Checking fallback location: $location"
+        if [[ -d "$location" ]]; then
+            debug_log "Found existing SRA cache directory: $location"
+            echo "$location"
+            return 0
+        fi
+    done
+
+    # If no existing directory found, use the configured root or fallback
+    if [[ -n "$sra_root" ]]; then
+        debug_log "Using configured root (directory will be created): ${sra_root}/sra"
+        echo "${sra_root}/sra"
+    else
+        debug_log "Using final fallback: /data/sra-cache/sra"
+        echo "/data/sra-cache/sra"  # Final fallback
+    fi
+    return 0
+}
+
 # Function to clean up SRA cache files
 cleanup_sra_cache() {
     local sra_id="$1"
-    local cache_dir="/data/sra-cache/sra"
-    
-    debug_log "Cleaning up cache files for $sra_id..."
+    local cache_dir
+    cache_dir=$(get_sra_cache_dir)
+
+    debug_log "Cleaning up cache files for $sra_id in $cache_dir..."
     
     # Clean up main SRA cache directory
     if [[ -d "$cache_dir" ]]; then
@@ -1131,6 +1185,7 @@ cleanup_sra_cache() {
               "$cache_dir/${sra_id}.sra.prf" \
               "$cache_dir/${sra_id}.sra.tmp" \
               "$cache_dir/${sra_id}.sra" \
+              "$cache_dir/${sra_id}.sra.cache" \
               "$cache_dir/${sra_id}.sra.vdbcache" 2>/dev/null
     fi
     
@@ -1437,12 +1492,14 @@ cleanup_on_exit() {
     # to keep the alignment files for successful mappings
     
     # Clean up SRA cache directory
-    if [[ -d "/data/sra-cache/sra" ]]; then
-        find "/data/sra-cache/sra" -type f -name "*.lock" -delete
-        find "/data/sra-cache/sra" -type f -name "*.prf" -delete
-        find "/data/sra-cache/sra" -type f -name "*.tmp" -delete
-        find "/data/sra-cache/sra" -type f -name "*.cache" -delete
-        find "/data/sra-cache/sra" -type f -name "*.vdbcache" -delete
+    local sra_cache_dir
+    sra_cache_dir=$(get_sra_cache_dir)
+    if [[ -d "$sra_cache_dir" ]]; then
+        find "$sra_cache_dir" -type f -name "*.lock" -delete
+        find "$sra_cache_dir" -type f -name "*.prf" -delete
+        find "$sra_cache_dir" -type f -name "*.tmp" -delete
+        find "$sra_cache_dir" -type f -name "*.cache" -delete
+        find "$sra_cache_dir" -type f -name "*.vdbcache" -delete
     fi
     
     exit
@@ -1584,6 +1641,11 @@ main() {
         error_log "Missing required tools, cannot proceed with reference processing"
         exit 1
     fi
+
+    # Detect and display SRA cache directory
+    local detected_sra_cache
+    detected_sra_cache=$(get_sra_cache_dir)
+    info_log "SRA cache directory: $detected_sra_cache"
 
     info_log "Generating index for reference file..."
     if ! generate_bwa_index "$reference_file"; then
