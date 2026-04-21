@@ -645,6 +645,24 @@ process_csv() {
     return 0
 }
 
+# Function to increment counter atomically
+increment_counter() {
+    local counter_file="$1"
+    local sra_id="$2"
+    local slot="$3"
+    local total_entries="$4"
+
+    local current_count
+    {
+        flock -x 200
+        current_count=$(<"$counter_file")
+        ((current_count++))
+        echo "$current_count" > "$counter_file"
+    } 200>"${counter_file}.lock"
+
+    info_log "[Slot $slot] Completed processing $sra_id ($current_count out of $total_entries)"
+}
+
 # Function to process SRA entry (download, extract, and map)
 process_sra_entry() {
     local sra_id="$1"
@@ -706,6 +724,7 @@ process_sra_entry() {
         execute_sqlite_cmd "$db_file" "UPDATE sra_entries SET status = 'failed', message = 'Failed to retrieve technology type' WHERE sra_id = '$sra_id';" >/dev/null
         cleanup_sra_cache "$sra_id"
         rm -rf "$temp_dir"
+        increment_counter "$counter_file" "$sra_id" "$slot" "$total_entries"
         return 1
     fi
 
@@ -726,6 +745,7 @@ process_sra_entry() {
         execute_sqlite_cmd "$db_file" "UPDATE sra_entries SET status = 'failed', message = 'Prefetch failed' WHERE sra_id = '$sra_id';" >/dev/null
         cleanup_sra_cache "$sra_id"
         rm -rf "$temp_dir"
+        increment_counter "$counter_file" "$sra_id" "$slot" "$total_entries"
         return 1
     fi
 
@@ -759,6 +779,7 @@ process_sra_entry() {
         execute_sqlite_cmd "$db_file" "UPDATE sra_entries SET status = 'failed', message = 'Extraction failed' WHERE sra_id = '$sra_id';" >/dev/null
         cleanup_sra_cache "$sra_id"
         rm -rf "$temp_dir"
+        increment_counter "$counter_file" "$sra_id" "$slot" "$total_entries"
         return 1
     fi
 
@@ -774,6 +795,7 @@ process_sra_entry() {
         execute_sqlite_cmd "$db_file" "UPDATE sra_entries SET status = 'failed', message = 'No FASTQ files found' WHERE sra_id = '$sra_id';" >/dev/null
         cleanup_sra_cache "$sra_id"
         rm -rf "$temp_dir"
+        increment_counter "$counter_file" "$sra_id" "$slot" "$total_entries"
         return 1
     fi
 
@@ -872,6 +894,7 @@ process_sra_entry() {
             kill $coverage_pid 2>/dev/null
             cleanup_sra_cache "$sra_id"
             rm -rf "$temp_dir"
+            increment_counter "$counter_file" "$sra_id" "$slot" "$total_entries"
             return 1
             ;;
     esac
@@ -884,6 +907,7 @@ process_sra_entry() {
         execute_sqlite_cmd "$db_file" "UPDATE sra_entries SET status = 'failed', message = 'Mapping failed' WHERE sra_id = '$sra_id';" >/dev/null
         cleanup_sra_cache "$sra_id"
         rm -rf "$temp_dir"
+        increment_counter "$counter_file" "$sra_id" "$slot" "$total_entries"
         return 1
     fi
 
@@ -901,15 +925,7 @@ process_sra_entry() {
     fi
 
     # Increment the counter atomically
-    local current_count
-    {
-        flock -x 200
-        current_count=$(<"$counter_file")
-        ((current_count++))
-        echo "$current_count" > "$counter_file"
-    } 200>"${counter_file}.lock"
-
-    info_log "[Slot $slot] Completed processing $sra_id ($current_count out of $total_entries)"
+    increment_counter "$counter_file" "$sra_id" "$slot" "$total_entries"
 
     # Clean up before exiting
     debug_log "[Slot $slot] Cleaning up SRA cache for $sra_id..."
