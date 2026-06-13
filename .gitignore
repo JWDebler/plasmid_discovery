@@ -1,0 +1,32 @@
+# Databases and their sidecar/backup files
+*.db
+*.db.bak*
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Logs
+*.log
+
+# Reference / sequence data and tabular exports (data artifacts, not code)
+*.fasta
+*.fa
+*.fastq
+*.fastq.gz
+*.tsv
+
+# Script backups
+*.bak
+
+# Runtime temp files / dirs created by sra-trawler-ena.sh
+tmp_processing/
+tmp_ena_*
+counter_ena_*
+counter_ena_*.lock
+sql_output_*
+sql_error_*
+*.lock
+
+# Per-organism output produced by the trawler
+reads_mapping_to_reference/
+alignments_mapping_to_reference/
