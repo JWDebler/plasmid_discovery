@@ -1825,6 +1825,34 @@ increment_counter() {
     debug_log "[Slot $slot] Completed processing $ena_id ($current_count out of $total_entries)"
 }
 
+# Function to generate the BWA-MEM2 index for the reference, once.
+# Without this, every `bwa-mem2 mem` call exits immediately printing nothing,
+# which surfaces downstream as `[main_samview] fail to read the header from "-"`
+# and "No alignments produced" for EVERY entry (typical on a fresh checkout where
+# the index was never built). bwa-mem2 writes .0123/.amb/.ann/.bwt.2bit.64/.pac
+# (NOT the classic BWA .bwt/.sa), so the existence check below tests for those.
+generate_bwa_index() {
+    local reference="$1"
+
+    if [[ -f "${reference}.bwt.2bit.64" ]] && [[ -f "${reference}.0123" ]] && \
+       [[ -f "${reference}.amb" ]] && [[ -f "${reference}.ann" ]] && \
+       [[ -f "${reference}.pac" ]]; then
+        debug_log "BWA-MEM2 index already present for $reference"
+        return 0
+    fi
+
+    info_log "Generating BWA-MEM2 index for reference: $reference"
+    local index_log="/dev/null"
+    [[ "$DEBUG_MODE" == "true" ]] && index_log="/dev/stderr"
+    if ! bwa-mem2 index "$reference" 2>"$index_log"; then
+        error_log "Failed to generate BWA-MEM2 index for $reference"
+        return 1
+    fi
+
+    debug_log "Successfully generated BWA-MEM2 index for $reference"
+    return 0
+}
+
 # Function to start downloads with proper slot management (adapted from V1)
 start_ena_downloads() {
     local db_file="$1"
@@ -2136,6 +2164,13 @@ main() {
 
     # Convert reference to absolute path
     reference_file=$(realpath "$reference_file")
+
+    # Build the BWA-MEM2 index once up front (idempotent). Mapping fails silently
+    # for every entry if this is missing, so do it before launching any slots.
+    if ! generate_bwa_index "$reference_file"; then
+        error_log "Cannot proceed without a BWA-MEM2 index for the reference"
+        exit 1
+    fi
 
     info_log "SRA Trawler ENA - Starting analysis"
     info_log "Database: $db_file"
