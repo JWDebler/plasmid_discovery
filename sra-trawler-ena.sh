@@ -95,6 +95,11 @@ Options:
                         file, map the pair only and drop the singletons. Default
                         is to map pairs PLUS singletons (single-end) and merge,
                         since the bare file can hold the bulk of the reads.
+    -s, --source STR   ENA library_source to keep (default: GENOMIC). Use e.g.
+                        TRANSCRIPTOMIC, METAGENOMIC, METATRANSCRIPTOMIC, or
+                        ANY/ALL to disable the filter. Non-GENOMIC values are
+                        tagged into the auto-generated DB name (e.g.
+                        fungi_transcriptomic_sra_wgs.db) so sources never mix.
     -m, --min-coverage NUM Minimum coverage threshold (default: 1)
     -r, --retry        Retry transient/retryable failures (status 'failed':
                         network, server, disk, mapping). Permanent 'no_data'
@@ -600,17 +605,35 @@ fetch_ena_metadata() {
     # Get taxonomy ID for the organism
     local tax_id=$(get_ena_taxonomy_id "$organism")
 
+    # Build the optional library_source clause. Defaults to GENOMIC but is set by
+    # -s/--source (SOURCE_FILTER); ANY/ALL disables the restriction. The clause is
+    # appended to whichever query form we use below.
+    local source_clause=""
+    case "${SOURCE_FILTER^^}" in
+        ""|"ANY"|"ALL")
+            info_log "library_source filter: ANY (no source restriction)"
+            ;;
+        *)
+            # URL-encode the value (spaces -> %20) and quote it if it contains
+            # whitespace, e.g. library_source="VIRAL RNA".
+            local src_enc="${SOURCE_FILTER// /%20}"
+            [[ "$SOURCE_FILTER" == *" "* ]] && src_enc="%22${src_enc}%22"
+            source_clause="%20AND%20library_source%3D${src_enc}"
+            info_log "library_source filter: ${SOURCE_FILTER}"
+            ;;
+    esac
+
     # Build ENA query
     local query
     if [[ -n "$tax_id" ]]; then
         # Use taxonomy tree search (more accurate)
-        query="tax_tree(${tax_id})%20AND%20library_strategy=WGS%20AND%20library_source=GENOMIC"
+        query="tax_tree(${tax_id})%20AND%20library_strategy%3DWGS${source_clause}"
         info_log "Using taxonomy search for '$organism' (tax_id: $tax_id)"
     else
         # Fallback to organism name search with proper URL encoding
         warn_log "No taxonomy ID found for '$organism', using name search (less precise)"
         local encoded_organism=$(echo "$organism" | sed 's/ /%20/g')
-        query="scientific_name%3D%22${encoded_organism}%22%20AND%20library_strategy%3DWGS%20AND%20library_source%3DGENOMIC"
+        query="scientific_name%3D%22${encoded_organism}%22%20AND%20library_strategy%3DWGS${source_clause}"
         info_log "Using name search for '$organism'"
     fi
 
@@ -792,15 +815,20 @@ fetch_ena_metadata() {
             continue
         fi
 
-        # Skip non-genomic sources (e.g. TRANSCRIPTOMIC/METATRANSCRIPTOMIC). The
-        # ENA query already filters to library_source=GENOMIC, so this is a
-        # defensive guard for older CSVs / DBs imported before that filter was
-        # added. RNA-seq coverage is expression-biased, not genomic, and is not
-        # useful for plasmid discovery.
-        if [[ -n "$library_source" && "$library_source" != "GENOMIC" ]]; then
-            ((skipped++))
-            continue
-        fi
+        # Skip rows whose library_source doesn't match the requested filter
+        # (default GENOMIC; ANY/ALL disables this). The ENA query already filters
+        # server-side, so this mainly guards older CSVs and rows with an empty
+        # source field. For the GENOMIC default this drops TRANSCRIPTOMIC etc.,
+        # whose coverage is expression-biased rather than genomic.
+        case "${SOURCE_FILTER^^}" in
+            ""|"ANY"|"ALL") ;;  # accept any source
+            *)
+                if [[ -n "$library_source" && "$library_source" != "${SOURCE_FILTER^^}" ]]; then
+                    ((skipped++))
+                    continue
+                fi
+                ;;
+        esac
 
         # Defensive column-order guard for the FASTQ URLs. The downloader treats
         # fastq_ftp as an HTTP(S)-reachable URL (it prepends https:// and curls
@@ -2015,6 +2043,7 @@ main() {
     local retry_all="false"
     local ncbi_slots=0    # of the -x slots, how many prefer NCBI prefetch (0 = ENA-first as before)
     local pairs_only="false"  # if true, drop singletons when a proper _1/_2 pair exists
+    local source_filter="GENOMIC"  # ENA library_source filter; ANY/ALL disables it
 
     # Parse command line arguments
     while [[ $# -gt 0 ]]; do
@@ -2060,6 +2089,10 @@ main() {
                 pairs_only="true"
                 shift
                 ;;
+            -s|--source)
+                source_filter="${2^^}"
+                shift 2
+                ;;
             -m|--min-coverage)
                 min_coverage="$2"
                 shift 2
@@ -2099,6 +2132,7 @@ main() {
     NCBI_SLOTS=$ncbi_slots
     MAX_PARALLEL=$max_parallel
     PAIRS_ONLY=$pairs_only
+    SOURCE_FILTER=$source_filter
 
     # Only require organism or CSV if database doesn't exist or is empty
     if [[ -z "$organism" ]] && [[ -z "$csv_file" ]]; then
@@ -2116,6 +2150,16 @@ main() {
         fi
     fi
 
+    # When auto-naming the DB, tag it with the source unless it's the default
+    # GENOMIC, so genomic and non-genomic data never share a default database
+    # (the schema doesn't store library_source, so they can't be separated later).
+    local db_source_tag=""
+    case "$source_filter" in
+        GENOMIC) ;;  # default -> keep the historical {organism}_sra_wgs.db name
+        ANY|ALL) db_source_tag="_any" ;;
+        *) db_source_tag="_$(echo "$source_filter" | tr 'A-Z ' 'a-z_')" ;;
+    esac
+
     # Auto-generate database filename if not provided
     if [[ -z "$db_file" ]]; then
         if [[ -n "$csv_file" ]]; then
@@ -2129,9 +2173,9 @@ main() {
                 db_file="${organism_safe}_sra_wgs.db"
             fi
         else
-            # Use organism name for database filename
+            # Use organism name (+ source tag) for database filename
             local organism_safe=$(sanitize_filename "$organism")
-            db_file="${organism_safe}_sra_wgs.db"
+            db_file="${organism_safe}${db_source_tag}_sra_wgs.db"
         fi
         info_log "Auto-generated database filename: $db_file"
     fi

@@ -146,6 +146,12 @@ required — but **NCBI EDirect is not**.
 # Higher concurrency (ENA supports it)
 ./sra-trawler-ena.sh -o "fungi" -f reference.fasta -x 20
 
+# Screen transcriptomic data instead of genomic (writes fungi_transcriptomic_sra_wgs.db)
+./sra-trawler-ena.sh -o "fungi" -f reference.fasta -s TRANSCRIPTOMIC
+
+# Don't filter by source at all
+./sra-trawler-ena.sh -o "fungi" -f reference.fasta -s ANY
+
 # Spread load: of 20 slots, prefer NCBI prefetch for 5 of them
 ./sra-trawler-ena.sh -o "fungi" -f reference.fasta -x 20 -N 5
 
@@ -164,6 +170,7 @@ required — but **NCBI EDirect is not**.
 - `-x, --connections INT` - Number of concurrent processing slots (default: 2)
 - `-N, --ncbi-slots INT` - Of the `-x` slots, how many prefer NCBI prefetch over ENA (default: 0)
 - `-P, --pairs-only` - For runs with both a `_1`/`_2` pair and a bare singletons file, map the pair only. Default maps pairs **plus** singletons (the bare file can hold the bulk of the reads)
+- `-s, --source STR` - ENA `library_source` to keep (default: `GENOMIC`). Use e.g. `TRANSCRIPTOMIC`, `METAGENOMIC`, or `ANY`/`ALL` to disable the filter. Non-`GENOMIC` values are tagged into the auto-generated DB name (e.g. `fungi_transcriptomic_sra_wgs.db`) so sources never share a database
 - `-m, --min-coverage NUM` - Minimum coverage threshold for saving reads (default: 1)
 - `-n, --notify STR` - Enable push notifications with custom message string
 - `-r, --retry` - Retry transient/retryable failures (status `failed`)
