@@ -1272,8 +1272,13 @@ check_required_tools() {
 generate_bwa_index() {
     local reference="$1"
     
-    # Check if index files already exist
-    if [[ -f "${reference}.bwt" ]] && [[ -f "${reference}.pac" ]] && [[ -f "${reference}.ann" ]] && [[ -f "${reference}.amb" ]] && [[ -f "${reference}.sa" ]]; then
+    # Check if index files already exist. bwa-mem2 writes
+    # .0123/.amb/.ann/.bwt.2bit.64/.pac (NOT the classic BWA .bwt/.sa), so test
+    # for those -- otherwise this never matches and the reference is needlessly
+    # re-indexed on every run.
+    if [[ -f "${reference}.bwt.2bit.64" ]] && [[ -f "${reference}.0123" ]] && \
+       [[ -f "${reference}.amb" ]] && [[ -f "${reference}.ann" ]] && \
+       [[ -f "${reference}.pac" ]]; then
         debug_log "BWA index files already exist for $reference"
         return 0
     fi
