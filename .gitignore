@@ -15,6 +15,18 @@
 *.fastq.gz
 *.tsv
 
+# Alignment outputs
+*.bam
+*.bai
+
+# BWA-mem2 index sidecar files
+*.bwt.2bit.64
+*.0123
+*.amb
+*.ann
+*.pac
+*.sa
+
 # Script backups
 *.bak
 
@@ -27,6 +39,6 @@ sql_output_*
 sql_error_*
 *.lock
 
-# Per-organism output produced by the trawler
-reads_mapping_to_reference/
-alignments_mapping_to_reference/
+# Per-organism trawler output lives under {organism}/{species}/{reads,alignments}/.
+# The directory names are dynamic, so the data artifacts inside them are excluded
+# by the file-type patterns above (*.fastq.gz, *.bam, etc.) rather than by name.

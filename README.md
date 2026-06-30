@@ -2,16 +2,27 @@ This is a selection of scripts I use to trawl through the NCBI SRA database usin
 
 # Scripts Overview
 
-This repository contains four main scripts that work together to identify and extract plasmid sequences from sequencing data:
+This repository contains five main scripts that work together to identify and extract plasmid sequences from sequencing data:
 
-1. **`sra-trawler.sh`** - Downloads and screens SRA entries for potential plasmid (or other) sequences
-2. **`plasmid_extractor.sh`** - Iteratively extracts and refines plasmid sequences from sequencing reads
-3. **`plasmid_optimizer.sh`** - Optimizes extracted plasmids by removing repeats and adjusting coordinates
-4. **`local_mapper.sh`** - Maps local Illumina paired-end reads to a reference genome
+1. **`sra-trawler.sh`** - Downloads and screens SRA entries for potential plasmid (or other) sequences via NCBI
+2. **`sra-trawler-ena.sh`** - Same idea, but discovers and downloads via the European Nucleotide Archive (ENA) with an NCBI/SRA fallback (faster, higher concurrency)
+3. **`plasmid_extractor.sh`** - Iteratively extracts and refines plasmid sequences from sequencing reads
+4. **`plasmid_optimizer.sh`** - Optimizes extracted plasmids by removing repeats and adjusting coordinates
+5. **`local_mapper.sh`** - Maps local Illumina paired-end reads to a reference genome
+
+> **Which trawler should I use?** `sra-trawler-ena.sh` is the newer and generally
+> faster option: it queries ENA's HTTP APIs, downloads FASTQ directly (falling back
+> to NCBI `prefetch`/`fasterq-dump` only when ENA has no FASTQ link), and supports
+> much higher concurrency. `sra-trawler.sh` is the original NCBI-only version and is
+> the only script that requires NCBI EDirect (`esearch`/`efetch`). Both produce the
+> same kind of output and SQLite database.
 
 ## 1. SRA Trawler (`sra-trawler.sh`)
 
 The SRA Trawler script is designed to systematically search through the NCBI SRA database to find sequencing datasets that contain potential plasmid sequences matching a supplied reference.
+
+> **Requires NCBI EDirect** (`esearch`/`efetch`) for organism queries, in addition to
+> the SRA Toolkit. EDirect is installed by `environment.yml` (see Installation).
 
 ### Purpose
 - Downloads all SRA entries for a given organism queries or CSV input
@@ -107,6 +118,62 @@ sqlite3 fungi_sra_wgs.db -header -separator $'\t' "SELECT * FROM sra_entries;" >
 sqlite3 fungi_sra_wgs.db "SELECT status, COUNT(*) FROM sra_entries GROUP BY status;"
 ```
 
+## 1b. SRA Trawler — ENA version (`sra-trawler-ena.sh`)
+
+A drop-in alternative to `sra-trawler.sh` that discovers and downloads data through the
+European Nucleotide Archive instead of NCBI. It resolves the organism to a taxonomy ID,
+queries ENA for runs, and downloads FASTQ directly over HTTP/FTP. Runs without an ENA
+FASTQ link fall back to NCBI `prefetch` + `fasterq-dump`, so the SRA Toolkit is still
+required — but **NCBI EDirect is not**.
+
+### Why use it
+- ENA allows ~50 requests/second (vs NCBI EDirect's ~3), so higher `-x` concurrency
+- Direct FASTQ downloads — no 15 GB bulk `runinfo` pulls
+- More robust to the transient `curl 56` errors seen against NCBI
+- Dual-source: each run can be fetched from ENA or NCBI, falling back to the other
+
+### Usage Examples
+```bash
+# Search ENA for fungi datasets (creates {organism}_sra_wgs.db)
+./sra-trawler-ena.sh -o "fungi" -f reference.fasta
+
+# Use an existing database
+./sra-trawler-ena.sh -d ena_fungi.db -o "fungi" -f reference.fasta
+
+# Use existing ENA CSV metadata
+./sra-trawler-ena.sh -d ena.db -c ena_metadata.csv -f reference.fasta
+
+# Higher concurrency (ENA supports it)
+./sra-trawler-ena.sh -o "fungi" -f reference.fasta -x 20
+
+# Spread load: of 20 slots, prefer NCBI prefetch for 5 of them
+./sra-trawler-ena.sh -o "fungi" -f reference.fasta -x 20 -N 5
+
+# Retry transient/retryable failures only (leaves permanent no_data entries)
+./sra-trawler-ena.sh -d ena.db -f reference.fasta -r
+
+# Retry ALL failures, including permanent no_data entries
+./sra-trawler-ena.sh -d ena.db -f reference.fasta -R
+```
+
+### Key Options
+- `-f, --reference FILE` - Reference genome FASTA file (required)
+- `-o, --organism STR` - Organism to search for (e.g. "fungi", "bacteria")
+- `-c, --csv FILE` - Input CSV file with ENA metadata
+- `-d, --db FILE` - Path to SQLite database file
+- `-x, --connections INT` - Number of concurrent processing slots (default: 2)
+- `-N, --ncbi-slots INT` - Of the `-x` slots, how many prefer NCBI prefetch over ENA (default: 0)
+- `-m, --min-coverage NUM` - Minimum coverage threshold for saving reads (default: 1)
+- `-n, --notify STR` - Enable push notifications with custom message string
+- `-r, --retry` - Retry transient/retryable failures (status `failed`)
+- `-R, --retry-all` - Retry ALL failures, including permanent `no_data` entries
+- `-D, --debug` - Enable debug mode for verbose output
+
+### Status values
+Entries move through `pending → processing → finished`. Failures are split into
+`failed` (transient/retryable — network, server, disk, mapping; reset with `-r`) and
+`no_data` (permanent — reads missing/corrupt in both ENA and SRA; only reset with `-R`).
+
 ## 2. Plasmid Extractor (`plasmid_extractor.sh`)
 
 The Plasmid Extractor script performs iterative assembly and refinement of plasmid sequences from sequencing reads.
@@ -180,11 +247,61 @@ The Local Mapper script maps local Illumina paired-end FASTQ files to a referenc
 
 # Installation
 
-First install NCBI eDirect tools as described [here](https://www.nlm.nih.gov/dataguide/edirect/install.html).
+### 1. Install the tools (one command)
 
-For the rest of the tools needed the easiest way is to use the supplied `environment.yml` file and install it using conda or mamba.
+All dependencies — including the SRA Toolkit and NCBI EDirect (`esearch`/`efetch`) —
+are installed from the supplied `environment.yml` using conda or mamba:
 
-`mamba env create -f environment.yml`
+```bash
+mamba env create -f environment.yml
+conda activate plasmidextractor
+```
+
+> Previous versions of this README told you to install NCBI EDirect separately. That
+> is no longer necessary — `entrez-direct` is now pinned in `environment.yml`. EDirect
+> is only used by `sra-trawler.sh`; `sra-trawler-ena.sh` doesn't need it.
+
+### 2. Configure NCBI SRA settings (one-time)
+
+Before running either trawler you should configure the SRA Toolkit. Two things matter:
+
+- **Cache/download directory.** `prefetch`/`fasterq-dump` cache data under the SRA
+  repository root. The default is in your home directory, which is often too small for
+  WGS-scale downloads — point it at a large disk. The trawlers read this setting back to
+  clean up cache files between runs.
+- **NCBI API key** (free, from [Account Settings → API Key Management](https://www.ncbi.nlm.nih.gov/account/settings/)).
+  It raises the E-utilities rate limit from 3 to 10 requests/second. Note the key has to
+  be set in **two** places: `vdb-config` (read by `prefetch`/`fasterq-dump`) and the
+  `NCBI_API_KEY` environment variable (read by EDirect's `esearch`/`efetch`).
+
+The included helper script does all of this for you:
+
+```bash
+./setup_ncbi.sh                                  # interactive prompts
+# or non-interactively:
+./setup_ncbi.sh -k <YOUR_API_KEY> -c /data/sra-cache
+```
+
+It runs the equivalent `vdb-config` commands and appends `export NCBI_API_KEY=...` to
+your `~/.bashrc`. If you'd rather do it by hand:
+
+```bash
+# Move the SRA cache/download dir to a large disk
+vdb-config --set /repository/user/main/public/root=/data/sra-cache
+
+# API key for sra-tools (prefetch / fasterq-dump)
+vdb-config --set /NCBI/api_key=<YOUR_API_KEY>
+
+# API key for EDirect (esearch / efetch) - add to your shell profile
+echo 'export NCBI_API_KEY=<YOUR_API_KEY>' >> ~/.bashrc && source ~/.bashrc
+
+# Verify
+vdb-config --cfg | grep -E 'api_key|root'
+```
+
+> **Push notifications (optional).** The `-n/--notify` option needs
+> [pushbullet-bash](https://github.com/Red5d/pushbullet-bash) (`pb` command) installed
+> and configured separately; it is not part of the conda environment.
 
 # Typical Workflow
 

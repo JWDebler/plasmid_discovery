@@ -71,8 +71,8 @@ CREATE TABLE sra_entries (
 ```
 
 **Output structure:**
-- `reads_mapping_to_reference/` - Compressed FASTQ files (>1x coverage only)
-- `alignments_mapping_to_reference/` - BAM files for mapped reads
+- `{organism}/{species}/reads/` - Compressed FASTQ files (>= min coverage only)
+- `{organism}/{species}/alignments/` - BAM files for mapped reads
 - `{organism}_sra_wgs.db` - SQLite database
 
 ### 2. plasmid_extractor.sh
@@ -164,7 +164,7 @@ Maps local Illumina paired-end FASTQ files to a reference genome.
 ./sra-trawler.sh -o "Aspergillus" -f reference_plasmid.fasta
 
 # 2. Extract plasmids from downloaded reads
-./plasmid_extractor.sh --sample reads_mapping_to_reference/ --batch --initial-ref reference_plasmid.fasta
+./plasmid_extractor.sh --sample aspergillus/aspergillus_fumigatus/reads/ --batch --initial-ref reference_plasmid.fasta
 
 # 3. Optimize extracted plasmids
 ./plasmid_optimizer.sh --reference reference_plasmid.fasta --plasmids plasmids_extracted/plasmids/
