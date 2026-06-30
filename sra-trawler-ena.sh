@@ -600,13 +600,13 @@ fetch_ena_metadata() {
     local query
     if [[ -n "$tax_id" ]]; then
         # Use taxonomy tree search (more accurate)
-        query="tax_tree(${tax_id})%20AND%20library_strategy=WGS"
+        query="tax_tree(${tax_id})%20AND%20library_strategy=WGS%20AND%20library_source=GENOMIC"
         info_log "Using taxonomy search for '$organism' (tax_id: $tax_id)"
     else
         # Fallback to organism name search with proper URL encoding
         warn_log "No taxonomy ID found for '$organism', using name search (less precise)"
         local encoded_organism=$(echo "$organism" | sed 's/ /%20/g')
-        query="scientific_name%3D%22${encoded_organism}%22%20AND%20library_strategy%3DWGS"
+        query="scientific_name%3D%22${encoded_organism}%22%20AND%20library_strategy%3DWGS%20AND%20library_source%3DGENOMIC"
         info_log "Using name search for '$organism'"
     fi
 
@@ -784,6 +784,16 @@ fetch_ena_metadata() {
         # Skip if not WGS (the ENA query already filters to WGS, so this is
         # effectively never hit; kept as a defensive guard).
         if [[ "$library_strategy" != "WGS" ]]; then
+            ((skipped++))
+            continue
+        fi
+
+        # Skip non-genomic sources (e.g. TRANSCRIPTOMIC/METATRANSCRIPTOMIC). The
+        # ENA query already filters to library_source=GENOMIC, so this is a
+        # defensive guard for older CSVs / DBs imported before that filter was
+        # added. RNA-seq coverage is expression-biased, not genomic, and is not
+        # useful for plasmid discovery.
+        if [[ -n "$library_source" && "$library_source" != "GENOMIC" ]]; then
             ((skipped++))
             continue
         fi
