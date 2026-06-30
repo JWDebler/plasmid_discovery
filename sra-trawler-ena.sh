@@ -91,6 +91,10 @@ Options:
                         CPU/disk-heavy (prefetch + fasterq-dump), so fasterq-dump
                         threads are split across the NCBI slots. 0 = ENA-first,
                         SRA-fallback (original behaviour).
+    -P, --pairs-only   When a run has a proper _1/_2 pair AND a bare singletons
+                        file, map the pair only and drop the singletons. Default
+                        is to map pairs PLUS singletons (single-end) and merge,
+                        since the bare file can hold the bulk of the reads.
     -m, --min-coverage NUM Minimum coverage threshold (default: 1)
     -r, --retry        Retry transient/retryable failures (status 'failed':
                         network, server, disk, mapping). Permanent 'no_data'
@@ -1685,15 +1689,24 @@ process_ena_entry() {
             [[ -n "$r1" && -n "$r2" ]] && pair_ok="true"
 
             # Decide what to map:
-            #   - If a proper _1/_2 pair exists, screen on the PAIRED reads only.
-            #     Any bare singletons file (reads that lost their mate) is
-            #     intentionally dropped -- we want clean paired Illumina data.
+            #   - If a proper _1/_2 pair exists, always map the pair. By default we
+            #     ALSO map any bare singletons file (reads that lost their mate) as
+            #     single-end and merge it into the same BAM, because that file can
+            #     hold the bulk of the run's reads (bwa-mem2 supports both paired
+            #     and single-end input). Pass --pairs-only to drop the singletons
+            #     and screen on clean paired reads only (the previous behaviour).
             #   - Otherwise (true single-end run, or only an orphaned half-pair),
             #     fall back to single-end mapping of whatever reads exist.
             local single_files=()
             if [[ "$pair_ok" == "true" ]]; then
-                [[ -n "$single" ]] && \
-                    warn_log "[Slot $slot] $ena_id has paired + singletons files; mapping paired only, dropping singletons ($(basename "$single"))"
+                if [[ -n "$single" ]]; then
+                    if [[ "${PAIRS_ONLY:-false}" == "true" ]]; then
+                        warn_log "[Slot $slot] $ena_id has paired + singletons files; --pairs-only set, dropping singletons ($(basename "$single"))"
+                    else
+                        info_log "[Slot $slot] $ena_id has paired + singletons files; mapping pairs plus singletons ($(basename "$single"))"
+                        single_files+=("$single")
+                    fi
+                fi
             else
                 [[ -n "$single" ]] && single_files+=("$single")
                 [[ -n "$r1" ]] && single_files+=("$r1")
@@ -1973,6 +1986,7 @@ main() {
     local retry_failed="false"
     local retry_all="false"
     local ncbi_slots=0    # of the -x slots, how many prefer NCBI prefetch (0 = ENA-first as before)
+    local pairs_only="false"  # if true, drop singletons when a proper _1/_2 pair exists
 
     # Parse command line arguments
     while [[ $# -gt 0 ]]; do
@@ -2014,6 +2028,10 @@ main() {
                 ncbi_slots="$2"
                 shift 2
                 ;;
+            -P|--pairs-only)
+                pairs_only="true"
+                shift
+                ;;
             -m|--min-coverage)
                 min_coverage="$2"
                 shift 2
@@ -2052,6 +2070,7 @@ main() {
     fi
     NCBI_SLOTS=$ncbi_slots
     MAX_PARALLEL=$max_parallel
+    PAIRS_ONLY=$pairs_only
 
     # Only require organism or CSV if database doesn't exist or is empty
     if [[ -z "$organism" ]] && [[ -z "$csv_file" ]]; then

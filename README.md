@@ -163,6 +163,7 @@ required — but **NCBI EDirect is not**.
 - `-d, --db FILE` - Path to SQLite database file
 - `-x, --connections INT` - Number of concurrent processing slots (default: 2)
 - `-N, --ncbi-slots INT` - Of the `-x` slots, how many prefer NCBI prefetch over ENA (default: 0)
+- `-P, --pairs-only` - For runs with both a `_1`/`_2` pair and a bare singletons file, map the pair only. Default maps pairs **plus** singletons (the bare file can hold the bulk of the reads)
 - `-m, --min-coverage NUM` - Minimum coverage threshold for saving reads (default: 1)
 - `-n, --notify STR` - Enable push notifications with custom message string
 - `-r, --retry` - Retry transient/retryable failures (status `failed`)
