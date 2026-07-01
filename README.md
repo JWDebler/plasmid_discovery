@@ -146,11 +146,12 @@ required — but **NCBI EDirect is not**.
 # Higher concurrency (ENA supports it)
 ./sra-trawler-ena.sh -o "fungi" -f reference.fasta -x 20
 
-# Screen transcriptomic data instead of genomic (writes fungi_transcriptomic_sra_wgs.db)
-./sra-trawler-ena.sh -o "fungi" -f reference.fasta -s TRANSCRIPTOMIC
+# Screen transcriptomic (RNA-seq) data: source AND strategy must both change,
+# since transcriptomic libraries are never WGS (writes ascochyta_transcriptomic_sra_any.db)
+./sra-trawler-ena.sh -o "Ascochyta" -f reference.fasta -s TRANSCRIPTOMIC -S ANY
 
-# Don't filter by source at all
-./sra-trawler-ena.sh -o "fungi" -f reference.fasta -s ANY
+# Don't filter by source or strategy at all
+./sra-trawler-ena.sh -o "fungi" -f reference.fasta -s ANY -S ANY
 
 # Spread load: of 20 slots, prefer NCBI prefetch for 5 of them
 ./sra-trawler-ena.sh -o "fungi" -f reference.fasta -x 20 -N 5
@@ -170,7 +171,8 @@ required — but **NCBI EDirect is not**.
 - `-x, --connections INT` - Number of concurrent processing slots (default: 2)
 - `-N, --ncbi-slots INT` - Of the `-x` slots, how many prefer NCBI prefetch over ENA (default: 0)
 - `-P, --pairs-only` - For runs with both a `_1`/`_2` pair and a bare singletons file, map the pair only. Default maps pairs **plus** singletons (the bare file can hold the bulk of the reads)
-- `-s, --source STR` - ENA `library_source` to keep (default: `GENOMIC`). Use e.g. `TRANSCRIPTOMIC`, `METAGENOMIC`, or `ANY`/`ALL` to disable the filter. Non-`GENOMIC` values are tagged into the auto-generated DB name (e.g. `fungi_transcriptomic_sra_wgs.db`) so sources never share a database
+- `-s, --source STR` - ENA `library_source` to keep (default: `GENOMIC`). Use e.g. `TRANSCRIPTOMIC`, `METAGENOMIC`, or `ANY`/`ALL` to disable the filter
+- `-S, --strategy STR` - ENA `library_strategy` to keep (default: `WGS`). Use e.g. `RNA-Seq`, or `ANY`/`ALL` to disable. **Transcriptomic data is never `WGS`**, so to screen RNA-seq combine `-s TRANSCRIPTOMIC` with `-S ANY` (all RNA libraries) or `-S RNA-Seq`. The strategy/source are tagged into the auto-generated DB name (e.g. `ascochyta_transcriptomic_sra_any.db`) so different filters never share a database
 - `-m, --min-coverage NUM` - Minimum coverage threshold for saving reads (default: 1)
 - `-n, --notify STR` - Enable push notifications with custom message string
 - `-r, --retry` - Retry transient/retryable failures (status `failed`)

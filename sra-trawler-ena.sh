@@ -97,9 +97,14 @@ Options:
                         since the bare file can hold the bulk of the reads.
     -s, --source STR   ENA library_source to keep (default: GENOMIC). Use e.g.
                         TRANSCRIPTOMIC, METAGENOMIC, METATRANSCRIPTOMIC, or
-                        ANY/ALL to disable the filter. Non-GENOMIC values are
+                        ANY/ALL to disable the filter.
+    -S, --strategy STR ENA library_strategy to keep (default: WGS). Use e.g.
+                        RNA-Seq, or ANY/ALL to disable. NOTE: transcriptomic data
+                        is never WGS, so to screen RNA-seq use e.g.
+                        '-s TRANSCRIPTOMIC -S ANY' (all RNA libraries) or
+                        '-s TRANSCRIPTOMIC -S RNA-Seq'. The strategy/source are
                         tagged into the auto-generated DB name (e.g.
-                        fungi_transcriptomic_sra_wgs.db) so sources never mix.
+                        ascochyta_transcriptomic_sra_any.db) so filters never mix.
     -m, --min-coverage NUM Minimum coverage threshold (default: 1)
     -r, --retry        Retry transient/retryable failures (status 'failed':
                         network, server, disk, mapping). Permanent 'no_data'
@@ -596,6 +601,19 @@ EOF
     return 0
 }
 
+# Build a URL-encoded `AND field="value"` clause for the ENA query, or an empty
+# string when the value is ANY/ALL/blank (i.e. no restriction). Values are always
+# quoted because ENA's parser rejects some unquoted values -- e.g.
+# library_strategy=RNA-Seq returns 0 hits, but library_strategy="RNA-Seq" works.
+build_filter_clause() {
+    local field="$1" value="$2"
+    case "${value^^}" in
+        ""|"ANY"|"ALL") echo ""; return 0 ;;
+    esac
+    local enc="${value// /%20}"   # encode spaces; value is wrapped in %22 quotes
+    echo "%20AND%20${field}%3D%22${enc}%22"
+}
+
 fetch_ena_metadata() {
     local organism="$1"
     local db_file="$2"
@@ -605,35 +623,25 @@ fetch_ena_metadata() {
     # Get taxonomy ID for the organism
     local tax_id=$(get_ena_taxonomy_id "$organism")
 
-    # Build the optional library_source clause. Defaults to GENOMIC but is set by
-    # -s/--source (SOURCE_FILTER); ANY/ALL disables the restriction. The clause is
-    # appended to whichever query form we use below.
-    local source_clause=""
-    case "${SOURCE_FILTER^^}" in
-        ""|"ANY"|"ALL")
-            info_log "library_source filter: ANY (no source restriction)"
-            ;;
-        *)
-            # URL-encode the value (spaces -> %20) and quote it if it contains
-            # whitespace, e.g. library_source="VIRAL RNA".
-            local src_enc="${SOURCE_FILTER// /%20}"
-            [[ "$SOURCE_FILTER" == *" "* ]] && src_enc="%22${src_enc}%22"
-            source_clause="%20AND%20library_source%3D${src_enc}"
-            info_log "library_source filter: ${SOURCE_FILTER}"
-            ;;
-    esac
+    # Build the optional library_strategy / library_source clauses. Defaults are
+    # WGS + GENOMIC, set by -S/--strategy and -s/--source; ANY/ALL on either
+    # disables that restriction. Both clauses start with their own "%20AND%20".
+    local strategy_clause source_clause
+    strategy_clause=$(build_filter_clause "library_strategy" "$STRATEGY_FILTER")
+    source_clause=$(build_filter_clause "library_source" "$SOURCE_FILTER")
+    info_log "library_strategy filter: ${STRATEGY_FILTER:-ANY}   library_source filter: ${SOURCE_FILTER:-ANY}"
 
     # Build ENA query
     local query
     if [[ -n "$tax_id" ]]; then
         # Use taxonomy tree search (more accurate)
-        query="tax_tree(${tax_id})%20AND%20library_strategy%3DWGS${source_clause}"
+        query="tax_tree(${tax_id})${strategy_clause}${source_clause}"
         info_log "Using taxonomy search for '$organism' (tax_id: $tax_id)"
     else
         # Fallback to organism name search with proper URL encoding
         warn_log "No taxonomy ID found for '$organism', using name search (less precise)"
         local encoded_organism=$(echo "$organism" | sed 's/ /%20/g')
-        query="scientific_name%3D%22${encoded_organism}%22%20AND%20library_strategy%3DWGS${source_clause}"
+        query="scientific_name%3D%22${encoded_organism}%22${strategy_clause}${source_clause}"
         info_log "Using name search for '$organism'"
     fi
 
@@ -808,22 +816,28 @@ fetch_ena_metadata() {
             continue
         fi
 
-        # Skip if not WGS (the ENA query already filters to WGS, so this is
-        # effectively never hit; kept as a defensive guard).
-        if [[ "$library_strategy" != "WGS" ]]; then
-            ((skipped++))
-            continue
-        fi
+        # Skip rows whose library_strategy doesn't match the requested filter
+        # (default WGS; ANY/ALL disables this). The ENA query already filters
+        # server-side, so this mainly guards older CSVs and rows with an empty
+        # field.
+        case "${STRATEGY_FILTER^^}" in
+            ""|"ANY"|"ALL") ;;  # accept any strategy
+            *)
+                if [[ -n "$library_strategy" && "${library_strategy^^}" != "${STRATEGY_FILTER^^}" ]]; then
+                    ((skipped++))
+                    continue
+                fi
+                ;;
+        esac
 
         # Skip rows whose library_source doesn't match the requested filter
-        # (default GENOMIC; ANY/ALL disables this). The ENA query already filters
-        # server-side, so this mainly guards older CSVs and rows with an empty
-        # source field. For the GENOMIC default this drops TRANSCRIPTOMIC etc.,
-        # whose coverage is expression-biased rather than genomic.
+        # (default GENOMIC; ANY/ALL disables this). For the GENOMIC default this
+        # drops TRANSCRIPTOMIC etc., whose coverage is expression-biased rather
+        # than genomic.
         case "${SOURCE_FILTER^^}" in
             ""|"ANY"|"ALL") ;;  # accept any source
             *)
-                if [[ -n "$library_source" && "$library_source" != "${SOURCE_FILTER^^}" ]]; then
+                if [[ -n "$library_source" && "${library_source^^}" != "${SOURCE_FILTER^^}" ]]; then
                     ((skipped++))
                     continue
                 fi
@@ -2044,6 +2058,7 @@ main() {
     local ncbi_slots=0    # of the -x slots, how many prefer NCBI prefetch (0 = ENA-first as before)
     local pairs_only="false"  # if true, drop singletons when a proper _1/_2 pair exists
     local source_filter="GENOMIC"  # ENA library_source filter; ANY/ALL disables it
+    local strategy_filter="WGS"    # ENA library_strategy filter; ANY/ALL disables it
 
     # Parse command line arguments
     while [[ $# -gt 0 ]]; do
@@ -2093,6 +2108,10 @@ main() {
                 source_filter="${2^^}"
                 shift 2
                 ;;
+            -S|--strategy)
+                strategy_filter="${2^^}"
+                shift 2
+                ;;
             -m|--min-coverage)
                 min_coverage="$2"
                 shift 2
@@ -2133,6 +2152,7 @@ main() {
     MAX_PARALLEL=$max_parallel
     PAIRS_ONLY=$pairs_only
     SOURCE_FILTER=$source_filter
+    STRATEGY_FILTER=$strategy_filter
 
     # Only require organism or CSV if database doesn't exist or is empty
     if [[ -z "$organism" ]] && [[ -z "$csv_file" ]]; then
@@ -2150,14 +2170,20 @@ main() {
         fi
     fi
 
-    # When auto-naming the DB, tag it with the source unless it's the default
-    # GENOMIC, so genomic and non-genomic data never share a default database
-    # (the schema doesn't store library_source, so they can't be separated later).
-    local db_source_tag=""
+    # When auto-naming the DB, encode the strategy/source so that runs with
+    # different filters never share a database (the schema stores neither field,
+    # so they couldn't be separated later). Name shape:
+    #   {organism}{source_tag}_sra_{strategy_tag}.db
+    # The WGS+GENOMIC default yields the historical {organism}_sra_wgs.db.
+    local db_source_tag="" db_strategy_tag
     case "$source_filter" in
-        GENOMIC) ;;  # default -> keep the historical {organism}_sra_wgs.db name
+        GENOMIC) ;;  # default -> no source tag
         ANY|ALL) db_source_tag="_any" ;;
         *) db_source_tag="_$(echo "$source_filter" | tr 'A-Z ' 'a-z_')" ;;
+    esac
+    case "$strategy_filter" in
+        ANY|ALL) db_strategy_tag="any" ;;
+        *) db_strategy_tag="$(echo "$strategy_filter" | tr 'A-Z ' 'a-z_')" ;;
     esac
 
     # Auto-generate database filename if not provided
@@ -2173,9 +2199,9 @@ main() {
                 db_file="${organism_safe}_sra_wgs.db"
             fi
         else
-            # Use organism name (+ source tag) for database filename
+            # Use organism name (+ source/strategy tags) for database filename
             local organism_safe=$(sanitize_filename "$organism")
-            db_file="${organism_safe}${db_source_tag}_sra_wgs.db"
+            db_file="${organism_safe}${db_source_tag}_sra_${db_strategy_tag}.db"
         fi
         info_log "Auto-generated database filename: $db_file"
     fi
