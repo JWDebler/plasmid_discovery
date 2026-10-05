@@ -542,7 +542,9 @@ backfill_center_names_from_studies() {
     study_tsv=$(mktemp ./tmp_ena_studies_XXXX)
     : > "$study_tsv"
 
-    local batch_size=100 i j q resp
+    local batch_size=100 i j q
+    local backfill_warned=""
+    local batch_resp=$(mktemp ./tmp_ena_study_XXXX)
     for (( i=0; i<study_total; i+=batch_size )); do
         q=""
         for (( j=i; j<i+batch_size && j<study_total; j++ )); do
@@ -553,16 +555,31 @@ backfill_center_names_from_studies() {
         [[ -z "$q" ]] && continue
 
         # POST (not GET) so the long OR-query isn't subject to URL-length limits.
-        resp=$(curl -s -X POST "${ENA_API_BASE}/search" \
+        local http_code curl_exit_code
+        http_code=$(curl -s -f -X POST "${ENA_API_BASE}/search" \
             --data-urlencode "query=$q" \
             --data-urlencode "result=study" \
             --data-urlencode "fields=study_accession,center_name" \
-            --data-urlencode "format=tsv" 2>/dev/null)
-        printf '%s\n' "$resp" | awk -F'\t' 'NR>1 && $2!="" {print}' >> "$study_tsv"
+            --data-urlencode "format=tsv" \
+            -w '%{http_code}' -o "$batch_resp")
+        curl_exit_code=$?
+
+        if [[ $curl_exit_code -ne 0 ]]; then
+            # Warn once per outage rather than once per 100-study batch
+            if [[ -z "$backfill_warned" ]]; then
+                warn_log "center_name backfill request failed: $(describe_curl_failure "$curl_exit_code" "$http_code")"
+                backfill_warned=1
+            fi
+            continue
+        fi
+
+        awk -F'\t' 'NR>1 && $2!="" {print}' "$batch_resp" >> "$study_tsv"
 
         (( (i / batch_size) % 10 == 0 )) && \
             debug_log "center_name backfill: queried $(( i+batch_size>study_total ? study_total : i+batch_size ))/$study_total studies"
     done
+
+    rm -f "$batch_resp"
 
     local fetched_rows
     fetched_rows=$(wc -l < "$study_tsv")
@@ -614,6 +631,48 @@ build_filter_clause() {
     echo "%20AND%20${field}%3D%22${enc}%22"
 }
 
+# Translate a curl exit code (plus the HTTP status it managed to observe) into a
+# human-readable cause. Mirrors the mapping used by the FASTQ download retry
+# loop so metadata failures are just as diagnosable.
+describe_curl_failure() {
+    local exit_code="$1" http_code="$2"
+    case "$exit_code" in
+        6)  echo "could not resolve host" ;;
+        7)  echo "failed to connect" ;;
+        22) # -f tripped on an HTTP >= 400; the status is the useful part
+            case "$http_code" in
+                429) echo "HTTP 429 from ENA Portal API (rate limited)" ;;
+                5??) echo "HTTP $http_code from ENA Portal API (service unavailable)" ;;
+                4??) echo "HTTP $http_code from ENA Portal API (bad request - check query/fields)" ;;
+                *)   echo "HTTP error (status: ${http_code:-unknown})" ;;
+            esac
+            ;;
+        23) echo "write error (disk full?)" ;;
+        28) echo "operation timeout" ;;
+        35) echo "SSL handshake failed" ;;
+        56) echo "network receive error" ;;
+        *)  echo "curl error $exit_code (HTTP: ${http_code:-unknown})" ;;
+    esac
+}
+
+# Run one ENA Portal API request, writing the body to $2 and logging a precise
+# cause on failure. Returns curl's exit code.
+ena_api_request() {
+    local url="$1" out_file="$2" label="$3"
+    local http_code curl_exit_code
+
+    http_code=$(curl -L -f -s -w '%{http_code}' "$url" -o "$out_file")
+    curl_exit_code=$?
+
+    if [[ $curl_exit_code -ne 0 ]]; then
+        warn_log "$label failed: $(describe_curl_failure "$curl_exit_code" "$http_code")"
+    else
+        debug_log "$label succeeded (HTTP: $http_code)"
+    fi
+
+    return $curl_exit_code
+}
+
 fetch_ena_metadata() {
     local organism="$1"
     local db_file="$2"
@@ -661,7 +720,7 @@ fetch_ena_metadata() {
 
     debug_log "Attempting unlimited request to get complete dataset"
 
-    if curl -L -f -s "$full_url" > "$temp_file" 2>/dev/null; then
+    if ena_api_request "$full_url" "$temp_file" "Unlimited metadata request"; then
         local line_count=$(wc -l < "$temp_file")
         if [[ "$line_count" -ge 2 ]]; then
             info_log "Successfully downloaded complete dataset: $((line_count - 1)) entries"
@@ -680,8 +739,10 @@ fetch_ena_metadata() {
 
         debug_log "Fallback request with limit $fallback_limit"
 
-        if ! curl -L -f -s "$full_url" > "$temp_file"; then
-            error_log "Fallback request also failed"
+        if ! ena_api_request "$full_url" "$temp_file" "Fallback metadata request"; then
+            error_log "Fallback request also failed (same endpoint as the unlimited attempt)"
+            error_log "If both attempts report an HTTP 5xx, the ENA Portal API itself is down - retry later:"
+            error_log "  curl -s -o /dev/null -w '%{http_code}\\n' '${ENA_API_BASE}/count?query=${query}&result=read_run'"
             rm -f "$temp_file"
             return 1
         fi
