@@ -673,6 +673,50 @@ ena_api_request() {
     return $curl_exit_code
 }
 
+# Ask the ENA Portal API how many records a query matches. Prints the number,
+# or nothing if the count endpoint fails (callers then skip the count check).
+get_ena_record_count() {
+    local query="$1" result="$2"
+    local response
+    response=$(curl -L -f -s "${ENA_API_BASE}/count?query=${query}&result=${result}" 2>/dev/null) || return 1
+    response=$(echo "$response" | tail -n 1 | tr -d '[:space:]')
+    [[ "$response" =~ ^[0-9]+$ ]] || return 1
+    echo "$response"
+}
+
+# Check that a downloaded ENA TSV is complete. ENA can fail partway through a
+# streamed search and still answer HTTP 200, so curl's exit code alone is not
+# enough: the body stops early and ends with a line like
+#   "ERROR occurred. Not all results may have been written.Query: {...}"
+# (2026-10-07: 129,981 of 270,227 rows, error line inserted as an ena_id).
+# Usage: validate_ena_tsv <file> <expected_rows|"">   Returns 1 if incomplete.
+validate_ena_tsv() {
+    local file="$1" expected="$2"
+
+    if grep -q '^ERROR occurred' "$file"; then
+        warn_log "ENA response contains a server-side error marker (results truncated): $(grep -m1 '^ERROR occurred' "$file" | cut -c1-120)"
+        return 1
+    fi
+
+    if [[ -s "$file" && -n "$(tail -c 1 "$file")" ]]; then
+        warn_log "ENA response does not end with a newline (download cut off mid-row)"
+        return 1
+    fi
+
+    local rows=$(( $(wc -l < "$file") - 1 ))
+    if [[ -n "$expected" ]]; then
+        # Allow a little drift: records can be added/suppressed between the
+        # count request and the search request.
+        local min_rows=$(( expected - expected / 100 ))
+        if (( rows < min_rows )); then
+            warn_log "ENA response has $rows rows but /count reports $expected (truncated download)"
+            return 1
+        fi
+    fi
+
+    return 0
+}
+
 fetch_ena_metadata() {
     local organism="$1"
     local db_file="$2"
@@ -718,9 +762,32 @@ fetch_ena_metadata() {
     local params="query=${query}&result=read_run&fields=${fields}&format=tsv&limit=0"
     local full_url="${ena_url}?${params}"
 
+    # Expected record count, used to detect truncated downloads (see validate_ena_tsv)
+    local expected_count
+    expected_count=$(get_ena_record_count "$query" "read_run")
+    if [[ -n "$expected_count" ]]; then
+        info_log "ENA reports $expected_count matching runs"
+    else
+        warn_log "Could not get record count from ENA /count endpoint; skipping completeness check"
+    fi
+
     debug_log "Attempting unlimited request to get complete dataset"
 
-    if ena_api_request "$full_url" "$temp_file" "Unlimited metadata request"; then
+    local unlimited_ok=false
+    local attempt max_attempts=3
+    for (( attempt = 1; attempt <= max_attempts; attempt++ )); do
+        if ena_api_request "$full_url" "$temp_file" "Unlimited metadata request (attempt $attempt/$max_attempts)" \
+            && validate_ena_tsv "$temp_file" "$expected_count"; then
+            unlimited_ok=true
+            break
+        fi
+        if (( attempt < max_attempts )); then
+            warn_log "Retrying unlimited request in $((attempt * 30))s..."
+            sleep $((attempt * 30))
+        fi
+    done
+
+    if [[ "$unlimited_ok" == "true" ]]; then
         local line_count=$(wc -l < "$temp_file")
         if [[ "$line_count" -ge 2 ]]; then
             info_log "Successfully downloaded complete dataset: $((line_count - 1)) entries"
@@ -730,7 +797,7 @@ fetch_ena_metadata() {
             return 1
         fi
     else
-        # Unlimited request failed (maybe timeout/network), try limited fallback
+        # Unlimited request failed or came back truncated; try limited fallback
         warn_log "Unlimited request failed, falling back to limited batch"
         local fallback_limit=100000
 
@@ -743,6 +810,16 @@ fetch_ena_metadata() {
             error_log "Fallback request also failed (same endpoint as the unlimited attempt)"
             error_log "If both attempts report an HTTP 5xx, the ENA Portal API itself is down - retry later:"
             error_log "  curl -s -o /dev/null -w '%{http_code}\\n' '${ENA_API_BASE}/count?query=${query}&result=read_run'"
+            rm -f "$temp_file"
+            return 1
+        fi
+
+        local fallback_expected=""
+        if [[ -n "$expected_count" ]]; then
+            fallback_expected=$(( expected_count < fallback_limit ? expected_count : fallback_limit ))
+        fi
+        if ! validate_ena_tsv "$temp_file" "$fallback_expected"; then
+            error_log "Fallback request also came back incomplete - ENA is having problems, retry later"
             rm -f "$temp_file"
             return 1
         fi
@@ -873,6 +950,14 @@ fetch_ena_metadata() {
         # (Previously these were dropped without being inserted, so they were
         # re-discovered as "new" and re-skipped on every run.)
         if [[ -z "$run" ]]; then
+            ((skipped++))
+            continue
+        fi
+
+        # Never key a row on something that isn't a run accession (e.g. an ENA
+        # error line that slipped past validate_ena_tsv)
+        if [[ ! "$run" =~ ^[SED]RR[0-9]+$ ]]; then
+            warn_log "Skipping row with malformed run accession: ${run:0:80}"
             ((skipped++))
             continue
         fi
