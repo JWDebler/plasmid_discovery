@@ -651,6 +651,7 @@ describe_curl_failure() {
         28) echo "operation timeout" ;;
         35) echo "SSL handshake failed" ;;
         56) echo "network receive error" ;;
+        92) echo "HTTP/2 stream error (server dropped the connection mid-transfer)" ;;
         *)  echo "curl error $exit_code (HTTP: ${http_code:-unknown})" ;;
     esac
 }
@@ -752,92 +753,84 @@ fetch_ena_metadata() {
     local ena_url="${ENA_API_BASE}/search"
     local fields="run_accession,sample_accession,experiment_accession,study_accession,scientific_name,instrument_platform,instrument_model,library_name,library_strategy,library_source,library_selection,read_count,base_count,center_name,first_public,last_updated,experiment_title,study_title,study_alias,experiment_alias,fastq_bytes,fastq_md5,fastq_ftp,fastq_aspera,fastq_galaxy,submitted_bytes,submitted_md5,submitted_ftp,submitted_aspera,submitted_galaxy,sample_alias,sample_title,tax_id,sample_description"
 
-    # ENA can return complete datasets in single requests (even 200k+ entries!)
-    # Strategy: Try unlimited first, fall back to limited if that fails
+    # ENA can fail partway through one huge streamed search (HTTP 200, body cut
+    # off mid-row), and on 2026-10-07 it did so on every attempt at the full
+    # ~270k-row fungi query. So download in first_public date ranges instead:
+    # each is a smaller request, validated against its own /count and retried
+    # on its own. (The Portal API ignores offset, so paging isn't an option.)
     local temp_file=$(mktemp ./tmp_ena_metadata_XXXX)
+    local chunk_file=$(mktemp ./tmp_ena_chunk_XXXX)
 
-    info_log "Fetching complete ENA metadata (attempting unlimited download)..."
-
-    # First attempt: Get ALL data with no limit (limit=0 means unlimited)
-    local params="query=${query}&result=read_run&fields=${fields}&format=tsv&limit=0"
-    local full_url="${ena_url}?${params}"
-
-    # Expected record count, used to detect truncated downloads (see validate_ena_tsv)
     local expected_count
     expected_count=$(get_ena_record_count "$query" "read_run")
     if [[ -n "$expected_count" ]]; then
         info_log "ENA reports $expected_count matching runs"
     else
-        warn_log "Could not get record count from ENA /count endpoint; skipping completeness check"
+        warn_log "Could not get record count from ENA /count endpoint; skipping completeness checks"
     fi
 
-    debug_log "Attempting unlimited request to get complete dataset"
-
-    local unlimited_ok=false
-    local attempt max_attempts=3
-    for (( attempt = 1; attempt <= max_attempts; attempt++ )); do
-        if ena_api_request "$full_url" "$temp_file" "Unlimited metadata request (attempt $attempt/$max_attempts)" \
-            && validate_ena_tsv "$temp_file" "$expected_count"; then
-            unlimited_ok=true
-            break
-        fi
-        if (( attempt < max_attempts )); then
-            warn_log "Retrying unlimited request in $((attempt * 30))s..."
-            sleep $((attempt * 30))
-        fi
+    # Range boundaries: everything before 2012, one range per year, then an
+    # open-ended range for anything newer
+    local boundaries=("1900-01-01")
+    local year this_year=$(date +%Y)
+    for (( year = 2012; year <= this_year + 1; year++ )); do
+        boundaries+=("${year}-01-01")
     done
+    boundaries+=("2100-01-01")
 
-    if [[ "$unlimited_ok" == "true" ]]; then
-        local line_count=$(wc -l < "$temp_file")
-        if [[ "$line_count" -ge 2 ]]; then
-            info_log "Successfully downloaded complete dataset: $((line_count - 1)) entries"
-        else
-            error_log "Unlimited request returned no data"
-            rm -f "$temp_file"
-            return 1
-        fi
-    else
-        # Unlimited request failed or came back truncated; try limited fallback
-        warn_log "Unlimited request failed, falling back to limited batch"
-        local fallback_limit=100000
+    info_log "Fetching ENA metadata in $(( ${#boundaries[@]} - 1 )) first_public date ranges..."
 
-        params="query=${query}&result=read_run&fields=${fields}&format=tsv&limit=${fallback_limit}"
-        full_url="${ena_url}?${params}"
+    local i from to range_query range_count range_url range_ok attempt max_attempts=3
+    local failed_ranges=() have_header=false
+    for (( i = 0; i < ${#boundaries[@]} - 1; i++ )); do
+        from="${boundaries[i]}"
+        to="${boundaries[i+1]}"
+        range_query="${query}%20AND%20first_public%3E%3D${from}%20AND%20first_public%3C${to}"
 
-        debug_log "Fallback request with limit $fallback_limit"
-
-        if ! ena_api_request "$full_url" "$temp_file" "Fallback metadata request"; then
-            error_log "Fallback request also failed (same endpoint as the unlimited attempt)"
-            error_log "If both attempts report an HTTP 5xx, the ENA Portal API itself is down - retry later:"
-            error_log "  curl -s -o /dev/null -w '%{http_code}\\n' '${ENA_API_BASE}/count?query=${query}&result=read_run'"
-            rm -f "$temp_file"
-            return 1
+        range_count=$(get_ena_record_count "$range_query" "read_run")
+        if [[ "$range_count" == "0" ]]; then
+            debug_log "Range $from..$to: no runs"
+            continue
         fi
 
-        local fallback_expected=""
-        if [[ -n "$expected_count" ]]; then
-            fallback_expected=$(( expected_count < fallback_limit ? expected_count : fallback_limit ))
-        fi
-        if ! validate_ena_tsv "$temp_file" "$fallback_expected"; then
-            error_log "Fallback request also came back incomplete - ENA is having problems, retry later"
-            rm -f "$temp_file"
-            return 1
+        range_url="${ena_url}?query=${range_query}&result=read_run&fields=${fields}&format=tsv&limit=0"
+        range_ok=false
+        for (( attempt = 1; attempt <= max_attempts; attempt++ )); do
+            if ena_api_request "$range_url" "$chunk_file" "Metadata $from..$to (attempt $attempt/$max_attempts)" \
+                && validate_ena_tsv "$chunk_file" "$range_count"; then
+                range_ok=true
+                break
+            fi
+            if (( attempt < max_attempts )); then
+                warn_log "Retrying range $from..$to in $((attempt * 30))s..."
+                sleep $((attempt * 30))
+            fi
+        done
+
+        if [[ "$range_ok" != "true" ]]; then
+            warn_log "Giving up on range $from..$to after $max_attempts attempts"
+            failed_ranges+=("$from..$to")
+            continue
         fi
 
-        local line_count=$(wc -l < "$temp_file")
-        if [[ "$line_count" -lt 2 ]]; then
-            error_log "Fallback request returned no data"
-            rm -f "$temp_file"
-            return 1
+        if [[ "$have_header" == "false" ]]; then
+            head -1 "$chunk_file" > "$temp_file"
+            have_header=true
         fi
+        tail -n +2 "$chunk_file" >> "$temp_file"
+        info_log "Range $from..$to: $(( $(wc -l < "$chunk_file") - 1 )) runs"
+    done
+    rm -f "$chunk_file"
 
-        if [[ "$line_count" -eq $(($fallback_limit + 1)) ]]; then
-            warn_log "Hit fallback limit of $fallback_limit entries"
-            warn_log "Complete dataset is larger - some entries may be missing"
-            warn_log "Try running again or use more specific organism queries"
+    if (( ${#failed_ranges[@]} > 0 )); then
+        warn_log "Metadata incomplete: ${#failed_ranges[@]} date range(s) failed: ${failed_ranges[*]}"
+        warn_log "Continuing with the ranges that downloaded; the database is add-only, so missing runs are picked up on a later run"
+    elif [[ -n "$expected_count" ]]; then
+        # Runs without a first_public date would fall outside every range
+        local got_rows=$(( $(wc -l < "$temp_file") - 1 ))
+        if (( got_rows < expected_count - expected_count / 100 )); then
+            warn_log "Date ranges returned $got_rows runs but ENA reports $expected_count in total"
         fi
-
-        info_log "Downloaded limited dataset: $((line_count - 1)) entries"
     fi
 
     # Check if we got any valid data
